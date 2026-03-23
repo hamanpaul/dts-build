@@ -9,6 +9,7 @@ from dtsbuild.agents.compiler import (
     _render_buttons,
     _render_ethphy,
     _render_i2c,
+    _render_pcie,
     _render_power_ctrl,
     _render_wan_sfp,
 )
@@ -215,6 +216,68 @@ def test_render_wan_sfp_emits_full_node_from_verified_sfp_signals():
     assert "tx-power-down-gpio = <&gpioc 52 GPIO_ACTIVE_HIGH>;" in rendered
     assert "rx-power-gpio = <&gpioc 6 GPIO_ACTIVE_LOW>;" in rendered
     assert "tx-disable-gpio = <&gpioc 30 GPIO_ACTIVE_HIGH>;" in rendered
+
+
+def test_render_pcie_stays_empty_without_tri_band_corrobation():
+    rendered = _render_pcie(
+        [
+            _sig("PCIE02_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_51"),
+            _sig("PCIE13_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_11"),
+        ]
+    )
+
+    assert rendered == ""
+
+
+def test_render_pcie_enables_all_hosts_from_grouped_controls_and_tri_band_signals():
+    rendered = _render_pcie(
+        [
+            _sig("PCIE02_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_51"),
+            _sig("PCIE13_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_11"),
+            _sig("2G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_76"),
+            _sig("5G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_77"),
+            _sig("6G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_78"),
+            _sig("2G_PEWAKE", "PCIE_WIFI", "GPIO_58"),
+            _sig("5G_PEWAKE", "PCIE_WIFI", "GPIO_79"),
+            _sig("6G_PEWAKE", "PCIE_WIFI", "GPIO_80"),
+        ]
+    )
+
+    assert "&pcie0 {" in rendered
+    assert "&pcie1 {" in rendered
+    assert "&pcie2 {" in rendered
+    assert "&pcie02 {" not in rendered
+    assert "&pcie13 {" not in rendered
+    assert rendered.count('status = "okay";') == 3
+
+
+def test_render_pcie_rejects_partial_tri_band_evidence():
+    rendered = _render_pcie(
+        [
+            _sig("PCIE02_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_51"),
+            _sig("PCIE13_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_11"),
+            _sig("2G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_76"),
+            _sig("2G_PEWAKE", "PCIE_WIFI", "GPIO_58"),
+            _sig("5G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_77"),
+            _sig("5G_PEWAKE", "PCIE_WIFI", "GPIO_79"),
+        ]
+    )
+
+    assert rendered == ""
+
+
+def test_render_pcie_requires_pewake_and_rf_disable_per_band():
+    rendered = _render_pcie(
+        [
+            _sig("PCIE02_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_51"),
+            _sig("PCIE13_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_11"),
+            _sig("2G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_76"),
+            _sig("5G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_77"),
+            _sig("6G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_78"),
+        ]
+    )
+
+    assert rendered == ""
 
 
 def test_compile_direct_renders_ethphy_hints_only_once(tmp_path):

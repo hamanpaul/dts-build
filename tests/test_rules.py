@@ -284,6 +284,14 @@ class TestPcieRule:
         wifi_reg = result.children[0]
         assert "GPIO_ACTIVE_LOW" in wifi_reg["properties"]["gpio"]
 
+    def test_rejects_grouped_wifi_controls_without_full_instance_evidence(self):
+        rule = PcieRule()
+        sigs = [
+            _sig("PCIE02_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_51"),
+            _sig("PCIE13_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_11"),
+        ]
+        assert rule.apply(sigs, [], []) is None
+
 
 # ── Power tests ──────────────────────────────────────────────────────
 

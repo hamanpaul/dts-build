@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dtsbuild.pcie_utils import infer_pcie_instances
 from dtsbuild.schema import HardwareSchema, Signal, Device, DtsHint
 from dtsbuild.schema_io import load_schema
 
@@ -494,17 +495,10 @@ def _render_usb(signals: list[Signal]) -> str:
 
 
 def _render_pcie(signals: list[Signal]) -> str:
-    """Render &pcie0/1/2 { ... } for PCIE_WIFI signals."""
-    pcie_signals = _signals_by_role(signals, "PCIE")
-    if not pcie_signals:
+    """Render &pcie0/1/2 { ... } for evidence-backed PCIe/Wi-Fi signals."""
+    instances = infer_pcie_instances(sig.name for sig in signals)
+    if not instances:
         return ""
-
-    # Group by PCIe instance
-    instances: dict[str, list[Signal]] = {}
-    for sig in pcie_signals:
-        m = re.search(r"pcie(\d+)", sig.name, re.IGNORECASE)
-        inst = m.group(1) if m else "0"
-        instances.setdefault(inst, []).append(sig)
 
     lines = []
     for inst in sorted(instances):

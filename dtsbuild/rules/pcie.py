@@ -8,8 +8,7 @@ Pattern source: BCM68575 BDK public reference (968575REF1.dts &pcie0..2)
 """
 from __future__ import annotations
 
-import re
-
+from dtsbuild.pcie_utils import infer_pcie_instances
 from dtsbuild.schema import Signal, Device, DtsHint
 from .base import SubsystemRule, RuleMatch
 
@@ -48,14 +47,10 @@ class PcieRule(SubsystemRule):
             return None
 
         # Detect PCIe instances
-        instances: set[int] = set()
-        for sig in pcie_sigs:
-            m = re.search(r"pcie(\d+)", sig.name, re.IGNORECASE)
-            if m:
-                instances.add(int(m.group(1)))
+        instances = infer_pcie_instances(sig.name for sig in signals)
 
         if not instances:
-            instances.add(0)
+            return None
 
         notes: list[str] = []
         children: list[dict] = []

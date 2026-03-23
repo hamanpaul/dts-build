@@ -14,6 +14,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from dtsbuild.pcie_utils import (
+    gpio_row_signal_name,
+    is_grouped_pcie_wifi_power_signal,
+    is_pcie_wifi_signal_name,
+)
 from dtsbuild.schema import HardwareSchema, Provenance
 from dtsbuild.schema_io import save_schema, load_schema
 from .tools.tracing import (
@@ -238,6 +243,8 @@ def _determine_device_status(
 
 def _classify_signal_role(signal_name: str) -> str:
     """Classify a GPIO signal name into a semantic role."""
+    if is_pcie_wifi_signal_name(signal_name):
+        return "PCIE_WIFI"
     for pattern, role in _ROLE_PATTERNS:
         if pattern.search(signal_name):
             return role
@@ -249,21 +256,46 @@ def _classify_signal_role(signal_name: str) -> str:
 def _read_gpio_table(gpio_table: Path) -> list[dict[str, str]]:
     """Read the GPIO table CSV and return rows with a usable signal name.
 
-    Skips rows where signal is empty, 'NA', or where name is 'Not used'.
+    Keeps BGW720 PCIe/Wi-Fi rows whose effective label may live in ``name``
+    instead of ``signal``.
     """
     rows: list[dict[str, str]] = []
     with open(gpio_table, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
-            sig = (row.get("signal") or "").strip()
+            sig = gpio_row_signal_name(row)
             name = (row.get("name") or "").strip()
-            # Skip empty / placeholder rows
-            if not sig or sig == "NA":
+            if not sig:
                 continue
-            if name.lower() == "not used":
+            if name.lower() == "not used" and not is_pcie_wifi_signal_name(sig):
                 continue
             rows.append(row)
     return rows
+
+
+def _write_gpio_table_signal(
+    signal_name: str,
+    gpio_pin: str,
+    role: str,
+    schema_path: str,
+) -> None:
+    """Record a signal that is directly evidenced by the GPIO table itself."""
+    write_signal(
+        schema_path=schema_path,
+        name=signal_name,
+        soc_pin=gpio_pin,
+        traced_path=f"{signal_name} ↔ {gpio_pin} (GPIO table)",
+        role=role,
+        status="VERIFIED",
+        provenance={
+            "pdfs": ["gpio_table"],
+            "pages": [0],
+            "refs": [],
+            "method": "gpio_table",
+            "confidence": 0.8,
+        },
+    )
+    logger.debug("Recorded %s from GPIO table evidence (%s)", signal_name, role)
 
 
 # ── Schema bootstrap ────────────────────────────────────────────────
@@ -774,9 +806,9 @@ async def _audit_direct(
 
     # 1. Trace each signal from the GPIO table
     for row in gpio_rows:
-        signal_name = (row.get("signal") or "").strip()
+        signal_name = gpio_row_signal_name(row)
         gpio_pin = (row.get("pin_or_gpio") or "").strip()
-        if not signal_name or signal_name == "NA":
+        if not signal_name:
             continue
 
         signal_aliases = [
@@ -788,6 +820,9 @@ async def _audit_direct(
         signal_name = signal_aliases[0]
 
         role = _classify_signal_role(signal_name)
+        if is_grouped_pcie_wifi_power_signal(signal_name):
+            _write_gpio_table_signal(signal_name, gpio_pin, role, sp)
+            continue
         try:
             _trace_signal(
                 signal_name,
