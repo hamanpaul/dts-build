@@ -108,3 +108,39 @@ def test_run_auditor_records_usb_signals_from_blockdiag_and_page_scan(tmp_path):
         assert signal.role.startswith("USB")
         assert signal.status == "VERIFIED"
         assert signal.provenance.method == "blockdiag+page_scan"
+
+
+def test_run_auditor_records_uart_only_with_header_context(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+    indices = {
+        "page_indices": {
+            "mainboard": {
+                7: "\n".join(
+                    [
+                        "P301V-04-SMT-G1-RT",
+                        "4PX1R",
+                        "UART0_SOUT     GPIO_14",
+                        "UART0_SIN      GPIO_15",
+                    ]
+                )
+            }
+        },
+        "tag_index": {},
+        "refdes_index": {},
+        "connector_index": {},
+    }
+
+    asyncio.run(run_auditor(indices, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    uart = {sig.name: sig for sig in schema.signals if sig.role == "UART"}
+
+    assert set(uart) == {"UART0_SOUT", "UART0_SIN"}
+    assert uart["UART0_SOUT"].soc_pin == "GPIO_14"
+    assert uart["UART0_SIN"].soc_pin == "GPIO_15"
+    assert uart["UART0_SOUT"].provenance.method == "page_scan"

@@ -340,6 +340,19 @@ def _find_token_occurrence(
     return None
 
 
+def _find_page_with_tokens(
+    indices: dict[str, Any],
+    pdf_id: str,
+    required_tokens: tuple[str, ...],
+) -> tuple[int, str] | None:
+    """Return the first page whose content contains all *required_tokens*."""
+    for page_num, content in _pages_for(indices, pdf_id).items():
+        haystack = content.upper()
+        if all(token.upper() in haystack for token in required_tokens):
+            return int(page_num), content
+    return None
+
+
 def _audit_usb_presence(
     indices: dict[str, Any],
     blockdiag_table: Path | None,
@@ -392,6 +405,45 @@ def _audit_usb_presence(
             },
         )
     logger.info("Recorded %d USB signals from blockdiag + schematic evidence", len(evidence))
+
+
+def _audit_uart_presence(
+    indices: dict[str, Any],
+    schema_path: str,
+) -> None:
+    """Record uart0 evidence only when TX/RX and 4-pin header context co-occur."""
+    hit = _find_page_with_tokens(
+        indices,
+        "mainboard",
+        ("UART0_SOUT", "UART0_SIN", "GPIO_14", "GPIO_15", "P301V-04-SMT-G1-RT"),
+    )
+    if hit is None:
+        return
+
+    page_num, _content = hit
+    for signal_name, soc_pin in (
+        ("UART0_SOUT", "GPIO_14"),
+        ("UART0_SIN", "GPIO_15"),
+    ):
+        write_signal(
+            schema_path=schema_path,
+            name=signal_name,
+            soc_pin=soc_pin,
+            traced_path=(
+                f"{signal_name} ↔ {soc_pin} (mainboard page {page_num}, "
+                "4-pin header context)"
+            ),
+            role="UART",
+            status="VERIFIED",
+            provenance={
+                "pdfs": ["mainboard"],
+                "pages": [page_num],
+                "refs": ["P301V-04-SMT-G1-RT"],
+                "method": "page_scan",
+                "confidence": 0.72,
+            },
+        )
+    logger.info("Recorded uart0 TX/RX from mainboard page %d header context", page_num)
 
 
 # ── Schema bootstrap ────────────────────────────────────────────────
@@ -951,6 +1003,7 @@ async def _audit_direct(
 
     # 2. Supplemental non-GPIO subsystem evidence
     _audit_usb_presence(indices, blockdiag_table, sp)
+    _audit_uart_presence(indices, sp)
 
     # 3. GPHY lane swap detection
     logger.info("Running GPHY lane swap detection")
