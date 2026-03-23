@@ -196,6 +196,7 @@ class TestI2cRule:
         result = rule.apply([], devs, [])
         assert result is not None
         assert result.node_name == "&i2c0"
+        assert result.properties["pinctrl-0"] == "<&bsc_m0_scl_pin_28 &bsc_m0_sda_pin_29>"
         assert result.properties["status"] == '"okay"'
         assert len(result.children) == 1
         child = result.children[0]
@@ -205,6 +206,14 @@ class TestI2cRule:
         assert child["properties"]["#gpio-cells"] == "<2>"
         assert child["properties"].get("gpio-controller") is None  # boolean
         assert "gpio-controller" in child["properties"]
+
+    def test_generates_i2c1_without_i2c0_pinctrl(self):
+        rule = I2cRule()
+        devs = [_dev("U9", "PCA9555", compatible="nxp,pca9555", bus="i2c1", address="0x20")]
+        result = rule.apply([], devs, [])
+        assert result is not None
+        assert result.node_name == "&i2c1"
+        assert "pinctrl-0" not in result.properties
 
     def test_no_match_without_i2c(self):
         rule = I2cRule()

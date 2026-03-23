@@ -95,9 +95,31 @@ def test_render_i2c_emits_u41_gpio_expander():
     )
 
     assert "&i2c0 {" in rendered
+    assert 'pinctrl-names = "default";' in rendered
+    assert "pinctrl-0 = <&bsc_m0_scl_pin_28 &bsc_m0_sda_pin_29>;" in rendered
     assert "u41: gpio@27 {" in rendered
     assert 'compatible = "nxp,pca9555";' in rendered
     assert "reg = <0x27>;" in rendered
+
+
+def test_render_i2c_limits_bsc_pinctrl_to_i2c0():
+    rendered = _render_i2c(
+        [],
+        [
+            Device(
+                refdes="U99",
+                part_number="PCA9555",
+                compatible="nxp,pca9555",
+                bus="i2c1",
+                address="0x20",
+                status="VERIFIED",
+                provenance=_prov(),
+            )
+        ],
+    )
+
+    assert "&i2c1 {" in rendered
+    assert "pinctrl-0 = <&bsc_m0_scl_pin_28 &bsc_m0_sda_pin_29>;" not in rendered
 
 
 def test_render_led_ctrl_keeps_control_bus_without_emitting_child_leds():

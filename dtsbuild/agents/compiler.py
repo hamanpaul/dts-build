@@ -30,6 +30,7 @@ _RESET_BUTTON_PRESS_TEXT = (
     "to do restore to default"
 )
 _RESET_BUTTON_RELEASE_TEXT = "Button Release"
+_I2C0_PINCTRL = "<&bsc_m0_scl_pin_28 &bsc_m0_sda_pin_29>"
 
 
 def _indent(text: str, level: int = 1) -> str:
@@ -430,8 +431,10 @@ def _render_i2c(signals: list[Signal], devices: list[Device]) -> str:
             "",
             f"&{bus} {{",
             f'{_INDENT}pinctrl-names = "default";',
-            f'{_INDENT}status = "okay";',
         ]
+        if bus == "i2c0":
+            lines.append(f"{_INDENT}pinctrl-0 = {_I2C0_PINCTRL};")
+        lines.append(f'{_INDENT}status = "okay";')
 
         for dev in bus_devices.get(bus, []):
             if dev.dnp:

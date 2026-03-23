@@ -11,6 +11,7 @@ from dtsbuild.schema import Signal, Device, DtsHint
 from .base import SubsystemRule, RuleMatch
 
 _SOURCE = "BCM68575 BDK public reference (968575REF1.dts &i2c0/i2c1 nodes)"
+_I2C0_PINCTRL = "<&bsc_m0_scl_pin_28 &bsc_m0_sda_pin_29>"
 
 
 class I2cRule(SubsystemRule):
@@ -90,13 +91,17 @@ class I2cRule(SubsystemRule):
             if bus != primary_bus:
                 notes.append(f"Additional bus {bus} with {len(bus_groups[bus])} device(s)")
 
+        properties = {
+            "pinctrl-names": '"default"',
+        }
+        if primary_bus == "i2c0":
+            properties["pinctrl-0"] = _I2C0_PINCTRL
+        properties["status"] = '"okay"'
+
         return RuleMatch(
             subsystem="i2c",
             node_name=f"&{primary_bus}",
-            properties={
-                "pinctrl-names": '"default"',
-                "status": '"okay"',
-            },
+            properties=properties,
             children=children,
             source=_SOURCE,
             confidence=1.0,
