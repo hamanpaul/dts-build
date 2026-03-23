@@ -1,0 +1,15 @@
+project: DemoBoard
+family: bcm68575
+profile: 968375GWO_WL25DX_WLMLO
+refboard: 968375GO
+model: DemoBoard
+output_dts: DemoBoard.dts
+base_include: inc/68375.dtsi
+compatible: brcm,bcm968375
+artifacts:
+  ddr_table: tables/ddr.csv
+  gpio_led_table: tables/gpio_led.csv
+  network_table: tables/network.csv
+  schematic_pdf: hw/schematic.pdf
+notes:
+  - Example sample folder for early tool development.

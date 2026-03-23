@@ -1,0 +1,13 @@
+.venv/
+.pytest_cache/
+.tmp/
+
+__pycache__/
+*.pyc
+
+dtsin_BGW720/out/
+*.Zone.Identifier
+*.zone.identifier
+*:Zone.Identifier
+
+dtsout_BGW720/.dts-session.json

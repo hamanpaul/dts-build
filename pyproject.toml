@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "dts-build"
+version = "0.2.0"
+description = "Generate BCM68575 DTS files from hardware evidence"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0,<7.0",
+    "openpyxl>=3.1,<4.0",
+]
+
+[project.optional-dependencies]
+agent = ["github-copilot-sdk>=0.1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+dts-build = "dtsbuild.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

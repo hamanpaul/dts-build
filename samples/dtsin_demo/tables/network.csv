@@ -1,0 +1,3 @@
+name,present,role,source,phy_handle,phy_mode,notes
+port_xgphy0,true,LAN,,xphy0,xfi,
+port_wan,true,WAN,serdes0,,serdes,

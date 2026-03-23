@@ -1,0 +1,3 @@
+category,name,signal,pin_or_gpio,polarity,notes
+gpio,reset_button,RESET#,gpioc 2,active_low,
+led,wan_led,WAN,led14,active_low,
