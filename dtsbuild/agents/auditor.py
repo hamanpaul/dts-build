@@ -273,6 +273,14 @@ def _read_gpio_table(gpio_table: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _read_blockdiag_table(blockdiag_table: Path) -> list[dict[str, str]]:
+    """Read optional block diagram CSV rows."""
+    if not blockdiag_table.exists():
+        return []
+    with open(blockdiag_table, newline="", encoding="utf-8-sig") as fh:
+        return list(csv.DictReader(fh))
+
+
 def _write_gpio_table_signal(
     signal_name: str,
     gpio_pin: str,
@@ -296,6 +304,94 @@ def _write_gpio_table_signal(
         },
     )
     logger.debug("Recorded %s from GPIO table evidence (%s)", signal_name, role)
+
+
+def _infer_soc_pin_from_line(line: str, token: str) -> str | None:
+    """Best-effort extraction of the SoC pad token nearest to *token*."""
+    token_match = re.search(re.escape(token), line, re.IGNORECASE)
+    if token_match is None:
+        return None
+
+    pad_matches = list(re.finditer(r"\b[A-Z]{1,2}\d{1,2}\b", line))
+    if not pad_matches:
+        return None
+
+    after = [m.group(0) for m in pad_matches if m.start() >= token_match.end()]
+    if after:
+        return after[0]
+
+    before = [m.group(0) for m in pad_matches if m.end() <= token_match.start()]
+    if before:
+        return before[-1]
+    return None
+
+
+def _find_token_occurrence(
+    indices: dict[str, Any],
+    token: str,
+) -> tuple[str, int, str] | None:
+    """Return the first ``(pdf_id, page_num, line)`` containing *token*."""
+    needle = token.upper()
+    for pdf_id in _all_pdf_ids(indices):
+        for page_num, content in _pages_for(indices, pdf_id).items():
+            for line in content.splitlines():
+                if needle in line.upper():
+                    return pdf_id, int(page_num), line
+    return None
+
+
+def _audit_usb_presence(
+    indices: dict[str, Any],
+    blockdiag_table: Path | None,
+    schema_path: str,
+) -> None:
+    """Record minimal USB host evidence from blockdiag + schematic page text."""
+    if blockdiag_table is None:
+        return
+
+    usb_rows = [
+        row for row in _read_blockdiag_table(blockdiag_table)
+        if str(row.get("domain", "")).strip().lower() == "usb"
+        and str(row.get("present", "")).strip().lower() in {"true", "1", "yes"}
+    ]
+    if not usb_rows:
+        return
+
+    required_tokens = (
+        ("USB0_PWRON_N", "USB_POWER"),
+        ("USB1_PWRON", "USB_POWER"),
+        ("USB0_SSRXN", "USB_SUPERSPEED"),
+    )
+    evidence: list[tuple[str, str, str, int, str, str]] = []
+    for token, role in required_tokens:
+        hit = _find_token_occurrence(indices, token)
+        if hit is None:
+            logger.info("USB audit skipped: missing schematic token %s", token)
+            return
+        pdf_id, page_num, line = hit
+        soc_pin = _infer_soc_pin_from_line(line, token)
+        if soc_pin is None:
+            logger.info("USB audit skipped: unable to infer SoC pin for %s", token)
+            return
+        evidence.append((token, role, pdf_id, page_num, line, soc_pin))
+
+    for token, role, pdf_id, page_num, _line, soc_pin in evidence:
+        write_signal(
+            schema_path=schema_path,
+            name=token,
+            soc_pin=soc_pin,
+            traced_path=f"{token} ↔ {soc_pin} (USB schematic page {page_num})",
+            role=role,
+            status="VERIFIED",
+            provenance={
+                "pdfs": [pdf_id, "blockdiag_table"],
+                "pages": [page_num, 0],
+                "refs": [token],
+                "method": "blockdiag+page_scan",
+                "confidence": 0.76,
+            },
+        )
+    logger.info("Recorded %d USB signals from blockdiag + schematic evidence", len(evidence))
 
 
 # ── Schema bootstrap ────────────────────────────────────────────────
@@ -798,6 +894,8 @@ async def _audit_direct(
     indices: dict[str, Any],
     gpio_rows: list[dict[str, str]],
     schema_path: Path,
+    *,
+    blockdiag_table: Path | None = None,
 ) -> None:
     """Systematically trace every GPIO signal and write results."""
     sp = str(schema_path)
@@ -851,11 +949,14 @@ async def _audit_direct(
                 },
             )
 
-    # 2. GPHY lane swap detection
+    # 2. Supplemental non-GPIO subsystem evidence
+    _audit_usb_presence(indices, blockdiag_table, sp)
+
+    # 3. GPHY lane swap detection
     logger.info("Running GPHY lane swap detection")
     _audit_gphy_lane_swap(indices, sp)
 
-    # 3. Device audit
+    # 4. Device audit
     logger.info("Running device audit")
     _audit_devices(indices, sp)
 
@@ -887,12 +988,23 @@ async def run_auditor(
     _ensure_schema(schema_path)
     _reset_schema(schema_path)
     gpio_rows = _read_gpio_table(gpio_table)
+    blockdiag_table = gpio_table.parent / "blockdiag.csv"
     logger.info("Read %d usable rows from %s", len(gpio_rows), gpio_table)
 
     if mode == "direct":
-        await _audit_direct(indices, gpio_rows, schema_path)
+        await _audit_direct(
+            indices,
+            gpio_rows,
+            schema_path,
+            blockdiag_table=blockdiag_table,
+        )
     elif mode == "agent":
         logger.warning("Agent mode not yet implemented, falling back to direct")
-        await _audit_direct(indices, gpio_rows, schema_path)
+        await _audit_direct(
+            indices,
+            gpio_rows,
+            schema_path,
+            blockdiag_table=blockdiag_table,
+        )
     else:
         raise ValueError(f"Unknown mode: {mode!r}. Use 'direct' or 'agent'.")

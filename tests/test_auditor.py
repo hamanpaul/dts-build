@@ -61,3 +61,50 @@ def test_run_auditor_records_grouped_pcie_power_signal_from_gpio_table(tmp_path)
     assert signal.role == "PCIE_WIFI"
     assert signal.status == "VERIFIED"
     assert signal.provenance.method == "gpio_table"
+
+
+def test_run_auditor_records_usb_signals_from_blockdiag_and_page_scan(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "blockdiag.csv").write_text(
+        "\n".join(
+            [
+                "domain,interface,present,controller,endpoint,page_ref,notes",
+                "usb,usb2,true,usb2,usb,mainboard:15,USB subsystem present",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+    indices = {
+        "page_indices": {
+            "mainboard": {
+                15: "\n".join(
+                    [
+                        "M33   USB0_PWRON_N",
+                        "USB1_PWRON    M31",
+                        "USB0_SSRXN   H32",
+                    ]
+                )
+            }
+        },
+        "tag_index": {},
+        "refdes_index": {},
+        "connector_index": {},
+    }
+
+    asyncio.run(run_auditor(indices, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    usb_names = {sig.name for sig in schema.signals}
+
+    assert {"USB0_PWRON_N", "USB1_PWRON", "USB0_SSRXN"} <= usb_names
+    for name in ("USB0_PWRON_N", "USB1_PWRON", "USB0_SSRXN"):
+        signal = next(sig for sig in schema.signals if sig.name == name)
+        assert signal.role.startswith("USB")
+        assert signal.status == "VERIFIED"
+        assert signal.provenance.method == "blockdiag+page_scan"
