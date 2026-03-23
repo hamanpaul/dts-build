@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 _INDENT = "    "
 _ETHPHY_BOOLEAN_HINT_PROPERTIES = frozenset({"enet-phy-lane-swap"})
+_RESET_BUTTON_FACTORY_RESET_SECONDS = 5
+_RESET_BUTTON_LINUX_CODE = "0x198"
+_RESET_BUTTON_PRESS_TEXT = (
+    f"Button Press -- Hold for {_RESET_BUTTON_FACTORY_RESET_SECONDS}s "
+    "to do restore to default"
+)
+_RESET_BUTTON_RELEASE_TEXT = "Button Release"
 
 
 def _indent(text: str, level: int = 1) -> str:
@@ -143,14 +150,18 @@ def _render_buttons(signals: list[Signal]) -> str:
             f"{_INDENT}{_INDENT}{_INDENT}ext_irq-gpio = <&gpioc {gpio} GPIO_ACTIVE_LOW>;",
             f"{_INDENT}{_INDENT}{_INDENT}interrupt-parent = <&gpioc>;",
             f"{_INDENT}{_INDENT}{_INDENT}interrupts = <{gpio} IRQ_TYPE_EDGE_FALLING>;",
+            f"{_INDENT}{_INDENT}{_INDENT}linux,code = <{_RESET_BUTTON_LINUX_CODE}>;",
             f"{_INDENT}{_INDENT}{_INDENT}press {{",
-            f'{_INDENT}{_INDENT}{_INDENT}{_INDENT}print = "Button Press -- Hold for 5s to do restore to default";',
+            f'{_INDENT}{_INDENT}{_INDENT}{_INDENT}print = "{_RESET_BUTTON_PRESS_TEXT}";',
             f"{_INDENT}{_INDENT}{_INDENT}}};",
             f"{_INDENT}{_INDENT}{_INDENT}hold {{",
-            f"{_INDENT}{_INDENT}{_INDENT}{_INDENT}rst_to_dflt = <5>;",
+            f"{_INDENT}{_INDENT}{_INDENT}{_INDENT}rst_to_dflt = <{_RESET_BUTTON_FACTORY_RESET_SECONDS}>;",
+            f"{_INDENT}{_INDENT}{_INDENT}{_INDENT}linux,press = <0>;",
             f"{_INDENT}{_INDENT}{_INDENT}}};",
             f"{_INDENT}{_INDENT}{_INDENT}release {{",
+            f'{_INDENT}{_INDENT}{_INDENT}{_INDENT}print = "{_RESET_BUTTON_RELEASE_TEXT}";',
             f"{_INDENT}{_INDENT}{_INDENT}{_INDENT}reset = <0>;",
+            f"{_INDENT}{_INDENT}{_INDENT}{_INDENT}linux,release = <0>;",
             f"{_INDENT}{_INDENT}{_INDENT}}};",
             f"{_INDENT}{_INDENT}}};",
         ])
