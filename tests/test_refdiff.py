@@ -280,3 +280,28 @@ def test_build_refdiff_report_maps_phy_wan_serdes_to_serdes_subsystem(tmp_path):
     missing = [c for c in report.candidates if c.target == "/&phy_wan_serdes"]
     assert len(missing) == 1
     assert missing[0].subsystem == "serdes"
+
+
+def test_build_refdiff_report_maps_wan_sfp_to_dedicated_surface(tmp_path):
+    generated = _write(tmp_path / "generated.dts", "/dts-v1/;\n/ { };\n")
+    reference = _write(
+        tmp_path / "reference.dts",
+        """\
+/dts-v1/;
+/ {
+    wan_sfp: wan_sfp {
+        compatible = "brcm,sfp";
+    };
+};
+""",
+    )
+
+    report = build_refdiff_report(
+        project="TEST",
+        generated_dts_path=generated,
+        reference_dts_path=reference,
+    )
+
+    missing = [c for c in report.candidates if c.target == "/wan_sfp"]
+    assert len(missing) == 1
+    assert missing[0].compiler_surface == "_render_wan_sfp"

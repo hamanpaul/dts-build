@@ -50,6 +50,15 @@ def _signals_by_role(signals: list[Signal], role: str) -> list[Signal]:
     ]
 
 
+def _find_signal(signals: list[Signal], *names: str) -> Signal | None:
+    """Return the first signal whose name matches one of *names* exactly."""
+    wanted = {name.upper() for name in names}
+    for signal in signals:
+        if signal.name.upper() in wanted:
+            return signal
+    return None
+
+
 def _extract_ethphy_indices_from_text(text: str | None) -> set[int]:
     """Extract GPHY/XPHY indices mentioned in free-form ethphy evidence."""
     if not text:
@@ -166,6 +175,53 @@ def _render_buttons(signals: list[Signal]) -> str:
         ])
 
     lines.append(f"{_INDENT}}};")
+    return "\n".join(lines)
+
+
+def _render_wan_sfp(signals: list[Signal]) -> str:
+    """Render wan_sfp { ... } in the root node from verified SFP GPIO evidence."""
+    los = _find_signal(signals, "WAN_SFP_RX_LOS")
+    present = _find_signal(signals, "WAN_SFP_PRESENT")
+    tx_power = _find_signal(signals, "WAN_XCVR_TXEN")
+    tx_power_down = _find_signal(signals, "WAN_SFP_PD_RST")
+    rx_power = _find_signal(signals, "WAN_XCVR_RXEN")
+
+    required = [los, present, tx_power, tx_power_down, rx_power]
+    if any(signal is None for signal in required):
+        return ""
+
+    gpio_nums = [
+        _extract_gpio_num(signal.soc_pin)
+        for signal in required
+        if signal is not None
+    ]
+    if len(gpio_nums) != 5 or any(gpio is None for gpio in gpio_nums):
+        return ""
+
+    los_gpio, present_gpio, tx_power_gpio, tx_power_down_gpio, rx_power_gpio = [
+        int(gpio)
+        for gpio in gpio_nums
+        if gpio is not None
+    ]
+
+    lines = [
+        "",
+        f"{_INDENT}wan_sfp: wan_sfp {{",
+        f'{_INDENT}{_INDENT}pinctrl-names = "default", "tx-sd", "eth";',
+        f"{_INDENT}{_INDENT}pinctrl-0 = <&wan0_lbe_pin_30>;",
+        f"{_INDENT}{_INDENT}pinctrl-1 = <&wan0_lbe_pin_30 &rogue_onu_in0_pin_27>;",
+        f"{_INDENT}{_INDENT}pinctrl-2 = <>;",
+        f'{_INDENT}{_INDENT}compatible = "brcm,sfp";',
+        f"{_INDENT}{_INDENT}i2c-bus = <&i2c0>;",
+        f"{_INDENT}{_INDENT}los-gpio = <&gpioc {los_gpio} GPIO_ACTIVE_HIGH>;",
+        f"{_INDENT}{_INDENT}mod-def0-gpio = <&gpioc {present_gpio} GPIO_ACTIVE_LOW>;",
+        f"{_INDENT}{_INDENT}tx-power-gpio = <&gpioc {tx_power_gpio} GPIO_ACTIVE_LOW>;",
+        f"{_INDENT}{_INDENT}tx-power-down-gpio = <&gpioc {tx_power_down_gpio} GPIO_ACTIVE_HIGH>;",
+        f"{_INDENT}{_INDENT}rx-power-gpio = <&gpioc {rx_power_gpio} GPIO_ACTIVE_LOW>;",
+        f"{_INDENT}{_INDENT}tx-disable-gpio = <&gpioc 30 GPIO_ACTIVE_HIGH>;",
+        f'{_INDENT}{_INDENT}status = "okay";',
+        f"{_INDENT}}};",
+    ]
     return "\n".join(lines)
 
 
@@ -672,6 +728,10 @@ async def _compile_direct(
     buttons_block = _render_buttons(verified_sigs)
     if buttons_block:
         parts.append(buttons_block)
+
+    wan_sfp_block = _render_wan_sfp(verified_sigs)
+    if wan_sfp_block:
+        parts.append(wan_sfp_block)
 
     # Close root node
     parts.append("};")

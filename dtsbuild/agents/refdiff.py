@@ -27,7 +27,7 @@ _RENDER_SURFACES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^/&usb0_xhci(?:/|$)"), "_render_usb"),
     (re.compile(r"^/&pcie\d+(?:/|$)"), "_render_pcie"),
     (re.compile(r"^/&wan_serdes(?:/|$)"), "_render_serdes"),
-    (re.compile(r"^/wan_sfp(?:/|$)"), "_render_serdes"),
+    (re.compile(r"^/wan_sfp(?:/|$)"), "_render_wan_sfp"),
     (re.compile(r"^/&ext_pwr_ctrl(?:/|$)"), "_render_power_ctrl"),
 )
 

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import asyncio
 
-from dtsbuild.agents.compiler import _compile_direct, _render_ethphy, _render_i2c, _render_power_ctrl
+from dtsbuild.agents.compiler import (
+    _compile_direct,
+    _render_ethphy,
+    _render_i2c,
+    _render_power_ctrl,
+    _render_wan_sfp,
+)
 from dtsbuild.schema import Device, DtsHint, HardwareSchema, Provenance, Signal
 
 
@@ -153,6 +159,28 @@ def test_render_ethphy_uses_hints_without_ethernet_phy_signals():
     assert 'status = "okay";' in rendered
 
 
+def test_render_wan_sfp_emits_full_node_from_verified_sfp_signals():
+    rendered = _render_wan_sfp(
+        [
+            _sig("WAN_SFP_RX_LOS", "SFP", "GPIO_03"),
+            _sig("WAN_SFP_PRESENT", "SFP", "GPIO_04"),
+            _sig("WAN_XCVR_RXEN", "SFP", "GPIO_06"),
+            _sig("WAN_SFP_PD_RST", "SFP", "GPIO_52"),
+            _sig("WAN_XCVR_TXEN", "SFP", "GPIO_53"),
+        ]
+    )
+
+    assert "wan_sfp: wan_sfp {" in rendered
+    assert 'compatible = "brcm,sfp";' in rendered
+    assert "i2c-bus = <&i2c0>;" in rendered
+    assert "los-gpio = <&gpioc 3 GPIO_ACTIVE_HIGH>;" in rendered
+    assert "mod-def0-gpio = <&gpioc 4 GPIO_ACTIVE_LOW>;" in rendered
+    assert "tx-power-gpio = <&gpioc 53 GPIO_ACTIVE_LOW>;" in rendered
+    assert "tx-power-down-gpio = <&gpioc 52 GPIO_ACTIVE_HIGH>;" in rendered
+    assert "rx-power-gpio = <&gpioc 6 GPIO_ACTIVE_LOW>;" in rendered
+    assert "tx-disable-gpio = <&gpioc 30 GPIO_ACTIVE_HIGH>;" in rendered
+
+
 def test_compile_direct_renders_ethphy_hints_only_once(tmp_path):
     schema = HardwareSchema(
         project="TEST",
@@ -175,3 +203,25 @@ def test_compile_direct_renders_ethphy_hints_only_once(tmp_path):
     assert rendered.count("&ethphytop {") == 1
     assert "xphy1-enabled;" in rendered
     assert "enet-phy-lane-swap;" in rendered
+
+
+def test_compile_direct_renders_wan_sfp_root_node_and_serdes_reference(tmp_path):
+    schema = HardwareSchema(
+        project="TEST",
+        chip="BCM68575",
+        signals=[
+            _sig("WAN_SFP_RX_LOS", "SFP", "GPIO_03"),
+            _sig("WAN_SFP_PRESENT", "SFP", "GPIO_04"),
+            _sig("WAN_XCVR_RXEN", "SFP", "GPIO_06"),
+            _sig("WAN_SFP_PD_RST", "SFP", "GPIO_52"),
+            _sig("WAN_XCVR_TXEN", "SFP", "GPIO_53"),
+        ],
+    )
+
+    output_path = tmp_path / "test.dts"
+    asyncio.run(_compile_direct(schema, output_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert "wan_sfp: wan_sfp {" in rendered
+    assert "trx = <&wan_sfp>;" in rendered
+    assert rendered.index("wan_sfp: wan_sfp {") < rendered.index("&wan_serdes {")
