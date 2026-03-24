@@ -29,13 +29,14 @@ def test_read_gpio_table_keeps_meaningful_pcie_wifi_rows(tmp_path):
     assert any(row["name"] == "PCIE02_WiFi_PWR_DIS" for row in rows)
     assert any(row["signal"] == "2G_RF_DISABLE_L" for row in rows)
     assert any(row["signal"] == "5G_PEWAKE" for row in rows)
-    assert not any(row["signal"] == "GPIO_5GRFIC" for row in rows)
+    assert any(row["signal"] == "GPIO_5GRFIC" for row in rows)
 
 
 def test_classify_signal_role_marks_aux_wifi_controls_as_pcie_wifi():
     assert _classify_signal_role("PCIE13_WiFi_PWR_DIS") == "PCIE_WIFI"
     assert _classify_signal_role("2G_RF_DISABLE_L") == "PCIE_WIFI"
     assert _classify_signal_role("6G_PEWAKE") == "PCIE_WIFI"
+    assert _classify_signal_role("GPIO_5GRFIC") == "PCIE_WIFI"
 
 
 def test_run_auditor_records_grouped_pcie_power_signal_from_gpio_table(tmp_path):

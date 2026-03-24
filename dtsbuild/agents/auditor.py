@@ -38,7 +38,7 @@ _ROLE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"LED", re.IGNORECASE), "LED"),
     (re.compile(r"^GPHY|^SGMII", re.IGNORECASE), "ETHERNET_PHY"),
     (re.compile(r"^RBR\b", re.IGNORECASE), "RESET_BUTTON"),
-    (re.compile(r"^PCIE|^RF_", re.IGNORECASE), "PCIE_WIFI"),
+    (re.compile(r"^PCIE|^RF_|GRFIC", re.IGNORECASE), "PCIE_WIFI"),
     (re.compile(r"^I2C|^SCL|^SDA", re.IGNORECASE), "I2C"),
     (re.compile(r"^USB", re.IGNORECASE), "USB"),
     (re.compile(r"PS_EN$|PWR", re.IGNORECASE), "POWER_CONTROL"),

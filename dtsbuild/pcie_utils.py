@@ -25,7 +25,11 @@ def is_grouped_pcie_wifi_power_signal(name: str) -> bool:
 def is_pcie_wifi_aux_signal(name: str) -> bool:
     """True for auxiliary PCIe/Wi-Fi control nets such as RF_DISABLE/PEWAKE."""
     normalized = normalize_signal_name(name)
-    return "RF_DISABLE" in normalized or "PEWAKE" in normalized
+    return (
+        "RF_DISABLE" in normalized
+        or "PEWAKE" in normalized
+        or "GRFIC" in normalized
+    )
 
 
 def is_pcie_wifi_signal_name(name: str) -> bool:

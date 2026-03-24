@@ -47,6 +47,12 @@ _REFERENCE_RETENTION_EXCLUDE_SNIPPET_PATTERNS = (
     re.compile(r"slic", re.IGNORECASE),
     re.compile(r"voip", re.IGNORECASE),
 )
+_PCIE_REGULATOR_SIGNAL_BY_INSTANCE = {
+    0: "GPIO_5GRFIC",
+    1: "GPIO_6GRFIC",
+    2: "GPIO_2GRFIC",
+}
+_PCIE_REGULATOR_POLARITY = "GPIO_ACTIVE_LOW"
 
 
 def _indent(text: str, level: int = 1) -> str:
@@ -515,7 +521,46 @@ def _render_pcie(signals: list[Signal]) -> str:
     if not instances:
         return ""
 
+    regulator_gpio_by_instance: dict[int, str] = {}
+    for inst, signal_name in _PCIE_REGULATOR_SIGNAL_BY_INSTANCE.items():
+        signal = _find_signal(signals, signal_name)
+        if signal is None:
+            regulator_gpio_by_instance = {}
+            break
+        gpio = _extract_gpio_num(signal.soc_pin)
+        if gpio is None:
+            regulator_gpio_by_instance = {}
+            break
+        regulator_gpio_by_instance[inst] = gpio
+
+    render_regulator_block = set(regulator_gpio_by_instance) == set(instances)
+
     lines = []
+    if render_regulator_block:
+        lines.extend([
+            "#if defined(CONFIG_BCM_PCIE_HCD) || defined(CONFIG_BCM_PCIE_HCD_MODULE)",
+            "/**********************************************************************/",
+            "/* GPIO: Add one define per PCIE (individual or shared) regulator     */",
+            "/*       - Skip if no GPIO regulators in use                          */",
+            "/**********************************************************************/",
+            "#define PCIE_REG_GPIOC     gpioc           /* Internal GPIO Controller */",
+        ])
+        for inst in sorted(instances):
+            gpio = regulator_gpio_by_instance[inst]
+            signal_name = _PCIE_REGULATOR_SIGNAL_BY_INSTANCE[inst]
+            lines.extend([
+                f"#define PCIE{inst}_REG_GPIO    {gpio}   /* {signal_name} board rail control */",
+                f"#define PCIE{inst}_REG_POLARITY  {_PCIE_REGULATOR_POLARITY}   /* board control net is active low */",
+            ])
+        lines.extend([
+            "",
+            '#include "../bcm_pcie_regulator.dtsi"',
+            "",
+            "/**********************************************************************/",
+            "/* PCIe: Add status = \"okay\" for each PCIe slots of this board        */",
+            "/**********************************************************************/",
+        ])
+
     for inst in sorted(instances):
         lines.extend([
             "",
@@ -523,6 +568,8 @@ def _render_pcie(signals: list[Signal]) -> str:
             f'{_INDENT}status = "okay";',
             "};",
         ])
+    if render_regulator_block:
+        lines.append("#endif // defined(CONFIG_BCM_PCIE_HCD) || defined(CONFIG_BCM_PCIE_HCD_MODULE)")
     return "\n".join(lines)
 
 

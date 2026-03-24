@@ -281,6 +281,39 @@ def test_render_pcie_requires_pewake_and_rf_disable_per_band():
     assert rendered == ""
 
 
+def test_render_pcie_renders_regulator_macros_from_grfic_controls():
+    rendered = _render_pcie(
+        [
+            _sig("PCIE02_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_51"),
+            _sig("PCIE13_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_11"),
+            _sig("2G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_76"),
+            _sig("5G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_77"),
+            _sig("6G_RF_DISABLE_L", "PCIE_WIFI", "GPIO_78"),
+            _sig("2G_PEWAKE", "PCIE_WIFI", "GPIO_58"),
+            _sig("5G_PEWAKE", "PCIE_WIFI", "GPIO_79"),
+            _sig("6G_PEWAKE", "PCIE_WIFI", "GPIO_80"),
+            _sig("GPIO_2GRFIC", "GENERAL_GPIO", "GPIO_24"),
+            _sig("GPIO_5GRFIC", "GENERAL_GPIO", "GPIO_54"),
+            _sig("GPIO_6GRFIC", "GENERAL_GPIO", "GPIO_25"),
+        ]
+    )
+
+    assert '#if defined(CONFIG_BCM_PCIE_HCD) || defined(CONFIG_BCM_PCIE_HCD_MODULE)' in rendered
+    assert "#define PCIE_REG_GPIOC     gpioc" in rendered
+    assert "#define PCIE0_REG_GPIO    54" in rendered
+    assert "#define PCIE1_REG_GPIO    25" in rendered
+    assert "#define PCIE2_REG_GPIO    24" in rendered
+    assert rendered.count("GPIO_ACTIVE_LOW") == 3
+    assert '#include "../bcm_pcie_regulator.dtsi"' in rendered
+    assert "&pcie0 {" in rendered
+    assert "&pcie1 {" in rendered
+    assert "&pcie2 {" in rendered
+    assert rendered.count('status = "okay";') == 3
+    assert rendered.rstrip().endswith(
+        "#endif // defined(CONFIG_BCM_PCIE_HCD) || defined(CONFIG_BCM_PCIE_HCD_MODULE)"
+    )
+
+
 def test_compile_direct_renders_ethphy_hints_only_once(tmp_path):
     schema = HardwareSchema(
         project="TEST",
