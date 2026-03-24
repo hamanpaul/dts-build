@@ -21,6 +21,21 @@ dts-build 是一個用於從硬體設計資料自動產生 Device Tree Source (D
 4. **可互動** — 資料不足時主動詢問使用者（ask-me 機制）
 5. **跨板延續** — board-to-board connector 即使在不同 PDF / 不同 refdes，也要優先用 pin number continuation 保守接回同一條電路
 
+### 目前判斷標準（必須一致遵守）
+
+- **答案卷只作 diff oracle / human review**
+  - 例如 `dtsout_BGW720/BGW720-300_v11.dts` 這類 board DTS answer key，只能拿來做事後比對與差異盤點。
+  - 不得作為 compiler input，不得直接決定 active DTS 值。
+- **public reference DTS 只作 public pattern source**
+  - `968575REF1.dts` 這類 public reference 只能提供 public rule / pattern 線索。
+  - 若保留其片段，也只能作為 **non-executing review context**，不得直接變成 active DTS code。
+- **第二組 SFP / `serdes1` 的門檻**
+  - 只有在 raw evidence 能獨立證明「第二組已裝配的 SFP cage/path」存在時，才能落地 `serdes1` / `lan_sfp` 類內容。
+  - 僅有 `...1` 命名、Reserve、`CPU_Service_*`、RFIC reuse label 等訊號名，不足以證成第二組 SFP。
+- **ref-only property 不可因答案卷存在就啟用**
+  - 例如 `&hsspi:/delete-property/ pinctrl-0`、`&ethphytop:xphy3-enabled`、`xphy4-enabled`、`wakeup-trigger-pin-gpio`，都必須回到 raw evidence 證成。
+  - 不能因 public ref 或 answer key 出現，就直接寫回 DTS。
+
 ## 架構
 
 ```

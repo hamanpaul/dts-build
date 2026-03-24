@@ -122,12 +122,27 @@ artifacts:
 - 可作為 DDR `memcfg_macro` 的 public pattern 來源
 - 可提供 `buttons` / `wan_sfp` / `wan_serdes` / `i2c` / `tod` 之類的 node pattern 線索
 - 只會作為 reference rules，不可覆蓋 schematic/table 證據，也不可當答案卷
+- 若某段 public reference 暫時需要保留，也只能作為 **non-executing review context**，不可直接變成 active DTS code
 
 目前 heuristic 會優先使用：
 
 - `xlsx/xlsm/csv`：直接讀取並標準化
 - `pdf`：用 schematic page index、block diagram、datasheet text 抽證據
 - public reference rules：僅用於像 `memcfg_macro` 這種可明確對應的 public rule，不使用 board DTS answer key
+
+## 目前判斷標準
+
+- **答案卷只作 diff oracle**
+  - 例如 `dtsout_BGW720/BGW720-300_v11.dts` 僅用於 `calibrate-dts` / `refdiff` / human review。
+  - 不可作為 compiler input，也不可直接決定 active DTS 值。
+- **public reference 不能直接落成 active DTS**
+  - `968575REF1.dts` 只能提供 public pattern / rule 線索。
+  - 若保留其片段，也只能留在 generated DTS 中作 non-executing review context。
+- **`serdes1` / 第二組 SFP 的判斷**
+  - 只有在 raw evidence 能獨立證明第二組已裝配的 SFP cage/path 存在時，才可落地 `serdes1` / `lan_sfp`。
+  - 單靠 `...1` 訊號名、Reserve、`CPU_Service_*` 或 RFIC reuse label，不構成充分證據。
+- **ref-only property 需要獨立證據**
+  - 例如 `&hsspi:/delete-property/ pinctrl-0`、`&ethphytop:xphy3-enabled`、`xphy4-enabled`、`wakeup-trigger-pin-gpio`，都必須由 raw evidence 單獨證成。
 
 ### 4. 產生 DTS 草稿
 

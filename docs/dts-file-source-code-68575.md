@@ -34,14 +34,14 @@
 |---|---|---|
 | **1. 新板名稱與最接近的 reference board** | 現有板檔不是從零開始寫，而是明顯在現成板上分層繼承；例如 `968575DV_2TEN.dts` 直接 include `inc/968575DV.dtsi`，`968575DV_V.dts` 甚至直接 include `968575DV.dts` 再疊 voice 設定。[^2] | 新板 DTS 檔名、`model` 字串、最像哪一塊現有板、以及和它不同的功能/接線。 |
 | **2. DDR 規格** | `memory_controller/memcfg` 在多個板檔中都不同，而且 memc driver 會讀這個欄位去推導容量與速度；樹內同時可看到 LPDDR4、LPDDR5、DDR4 等不同組合。[^4][^5] | DDR 類型、speed bin、總位寬、總容量、SSC、是否沿用現有 reference board 的相同記憶體配置。 |
-| **3. 網路拓樸** | `68375.dtsi` 的 `xport`、`ethphytop`、`serdes`、`mdio`、`switch0` port skeleton 都是先定義再預設關閉；每塊板才決定哪些 `xphy0..4`、`serdes0/1`、`port_wan`/`port_slan` 被打開，還要指定 `phy-mode`、`phy-handle`、`port-group`、WAN/LAN 角色。[^3] | 每個實體 RJ45/SFP/光口對應到哪個 xphy/serdes、速率能力、WAN/LAN 角色、是否為 optical / copper / USXGMII、是否有 mux/detect。 |
+| **3. 網路拓樸** | `68375.dtsi` 的 `xport`、`ethphytop`、`serdes`、`mdio`、`switch0` port skeleton 都是先定義再預設關閉；每塊板才決定哪些 `xphy0..4`、`serdes0/1`、`port_wan`/`port_slan` 被打開，還要指定 `phy-mode`、`phy-handle`、`port-group`、WAN/LAN 角色。[^3] | 每個實體 RJ45/SFP/光口對應到哪個 xphy/serdes、速率能力、WAN/LAN 角色、是否為 optical / copper / USXGMII、是否有 mux/detect。**若要成立第二組 SFP / `serdes1`，必須能獨立證明第二組已裝配的 SFP cage/path 存在；僅靠 `...1` 命名、Reserve 或 service label 不足以成立。** |
 | **4. 板級 GPIO / pinmux / bus map** | 同一個功能在不同板上會綁到不同 GPIO 或 pinctrl；例如 SFP 的 lane enable/select、I2C1 的 SDA/SCL、TOD 的 1PPS/8K、serial LED 的 data/clk/mask 都是用具名 pinctrl 條目綁定的。[^6] | 一張表列出：每個功能訊號（reset、interrupt、LOS、TX_DISABLE、LED、按鍵、I2C、SPI CS、USB power…）對應哪個 GPIO / pin / bus、極性是高有效還是低有效。 |
 
 ### B. 有某些功能時，還要補的資料
 
 | 功能 | 為什麼需要額外資料 | 你要補哪些資訊 |
 |---|---|---|
-| **SFP / 光模組** | 現有 dual-SFP 板都要提供 `i2c-bus`、`los-gpio`、`mod-def0-gpio`、`tx-disable-gpio`，有些還多了 `tx-power-gpio`、`tx-power-down-gpio`、`rx-power-gpio`；對應 serdes 端還會綁 `trx`、`lane-enable`、`lane-select`、signal detect pinctrl 與支援速率模式。[^9][^10] | 每個 SFP cage 的 I2C bus、MOD_DEF0、LOS、TX_DISABLE、TX_POWER、RX_POWER、TX_POWER_DOWN、signal detect、lane enable/select、支援 1G/2.5G/5G/10G 哪些模式。 |
+| **SFP / 光模組** | 現有 dual-SFP 板都要提供 `i2c-bus`、`los-gpio`、`mod-def0-gpio`、`tx-disable-gpio`，有些還多了 `tx-power-gpio`、`tx-power-down-gpio`、`rx-power-gpio`；對應 serdes 端還會綁 `trx`、`lane-enable`、`lane-select`、signal detect pinctrl 與支援速率模式。[^9][^10] | 每個 **已實際裝配** 的 SFP cage 都要提供：I2C bus、MOD_DEF0、LOS、TX_DISABLE、TX_POWER、RX_POWER、TX_POWER_DOWN、signal detect、lane enable/select、支援 1G/2.5G/5G/10G 哪些模式。**若無法證明第二組 cage/path 實際存在，就不能落地第二個 `serdes` / `lan_sfp`。** |
 | **外接 XPHY / USXGMII PHY** | `968575DV_2TEN.dts` 顯示如果 serdes 後面不是 SFP 而是外接 USXGMII PHY，就需要 `serdes*_xphy` 節點、MDIO address、`phy-power`、`phy-reset`、有時還要 `phy-magic-gpio` / `phy-link-gpio` 與 lane select 極性。[^11] | 外接 PHY 型號、MDIO 位址、是否用 USXGMII、reset/power GPIO、任何 vendor 特殊 GPIO。 |
 | **I2C 裝置 / expander / mux** | 同樣是 68575 板，不同板上 I2C 拓樸差很多：`968575DV` 類板在 `i2c0` 下掛 `pca9557`/`pca9555`/`ina236`，而 `968575SV_PVT1` 類板則在 `i2c0` 下掛 `pca9548` 再把 WAN SFP 走到 mux channel。[^8][^12] | 每顆 I2C device 的 bus、7-bit 地址、用途（boardid expander / WLAN expander / current monitor / mux / EEPROM / SFP EEPROM）。 |
 | **LED** | 現有板的 LED 不是只寫 label；還要定義 `serial-shifters-installed`、每顆 LED 的 `crossbar-output`、是否 `active_low`、是否是 `network-leds`、亮度、是否由 USB port trigger。[^8][^13] | 每個 LED 的名稱、對應埠/功能、是否走 serial LED、crossbar index 或 GPIO、active high/low、是否有 default trigger。 |
@@ -215,7 +215,7 @@ pinmux_gpio_map:
 
 ## 我建議你怎麼準備資料，效率最高
 
-1. **先選一塊最像的現成板**：如果你是 dual-SFP 類型，可先從 `968575DV.dts` 或 `968575REF1.dts` 看起；若是 serdes 後面接外部 USXGMII PHY，`968575DV_2TEN.dts` 是更好的起點；若要 voice，`968575DV_V.dts` 或 `968575REF1.dts` 會更接近；若 WAN SFP 走 I2C mux，請以 `968575SV_PVT1.dts` 為起點。[^9][^10][^11][^12][^17]
+1. **先選一塊最像的現成板**：如果你是 dual-SFP 類型，可先從 `968575DV.dts` 或 `968575REF1.dts` 看起；若是 serdes 後面接外部 USXGMII PHY，`968575DV_2TEN.dts` 是更好的起點；若要 voice，`968575DV_V.dts` 或 `968575REF1.dts` 會更接近；若 WAN SFP 走 I2C mux，請以 `968575SV_PVT1.dts` 為起點。[^9][^10][^11][^12][^17] **但這些板檔只適合拿來看結構與欄位，不可直接當答案卷抄回新板 DTS。**
 
 2. **把差異整理成一張表，而不是只給 schematic PDF**：因為實際要寫進 DTS 的資訊是 `GPIO / polarity / pinctrl / bus / MDIO address / port role / LED crossbar` 這類離散欄位；若你能把 schematic 轉成表格，我可以更快把它翻成 DTS。現有板檔正是以這種粒度在描述硬體。[^3][^6][^8][^9]
 
