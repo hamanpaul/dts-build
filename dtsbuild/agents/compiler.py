@@ -40,6 +40,13 @@ _REFERENCE_RETENTION_EXCLUDE_PATTERNS = (
     re.compile(r"slic", re.IGNORECASE),
     re.compile(r"voip", re.IGNORECASE),
 )
+_REFERENCE_RETENTION_EXCLUDE_SNIPPET_PATTERNS = (
+    re.compile(r"\blan_sfp\b", re.IGNORECASE),
+    re.compile(r"\bvoice\b", re.IGNORECASE),
+    re.compile(r"bcm_voice", re.IGNORECASE),
+    re.compile(r"slic", re.IGNORECASE),
+    re.compile(r"voip", re.IGNORECASE),
+)
 
 
 def _indent(text: str, level: int = 1) -> str:
@@ -782,6 +789,11 @@ def _target_node_path(target: str) -> str:
     return target
 
 
+def _should_exclude_reference_snippet(snippet: list[str]) -> bool:
+    snippet_text = "\n".join(snippet)
+    return any(pattern.search(snippet_text) for pattern in _REFERENCE_RETENTION_EXCLUDE_SNIPPET_PATTERNS)
+
+
 def _reference_target_line(reference_doc: Any, target: str) -> int | None:
     node_index = reference_doc.node_index()
     if ":" in target:
@@ -862,7 +874,7 @@ def _build_inline_retention_block(candidate: Any, snippet: list[str]) -> list[st
         ),
     ]
     for snippet_line in snippet:
-        lines.append(snippet_line)
+        lines.append(f"// {snippet_line}" if snippet_line else "//")
     return lines
 
 
@@ -959,7 +971,7 @@ def _apply_inline_reference_retention(
     interactive: bool,
     input_handler: Callable | None,
 ) -> str:
-    """Insert retained public-reference snippets with a leading note at original locations."""
+    """Insert retained public-reference snippets as non-executing review context."""
     if ref_dts_path is None or not ref_dts_path.exists():
         return generated_dts_path.read_text(encoding="utf-8")
 
@@ -987,6 +999,8 @@ def _apply_inline_reference_retention(
     for candidate in candidates:
         snippet = _extract_reference_snippet(reference_lines, reference_doc, candidate.target)
         if not snippet:
+            continue
+        if _should_exclude_reference_snippet(snippet):
             continue
 
         if candidate.candidate_type == "missing_property":
