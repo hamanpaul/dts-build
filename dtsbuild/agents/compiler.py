@@ -794,6 +794,10 @@ def _should_exclude_reference_snippet(snippet: list[str]) -> bool:
     return any(pattern.search(snippet_text) for pattern in _REFERENCE_RETENTION_EXCLUDE_SNIPPET_PATTERNS)
 
 
+def _escape_block_comment_text(line: str) -> str:
+    return line.replace("/*", "/ *").replace("*/", "* /")
+
+
 def _reference_target_line(reference_doc: Any, target: str) -> int | None:
     node_index = reference_doc.node_index()
     if ":" in target:
@@ -869,12 +873,13 @@ def _build_inline_retention_block(candidate: Any, snippet: list[str]) -> list[st
     lines = [
         "",
         (
-            f"// Retained from public reference ({source}): "
+            f"/* Retained from public reference ({source}): "
             "no direct evidence confirms that this feature is absent on the target board."
         ),
     ]
     for snippet_line in snippet:
-        lines.append(f"// {snippet_line}" if snippet_line else "//")
+        lines.append(_escape_block_comment_text(snippet_line))
+    lines.append("*/")
     return lines
 
 

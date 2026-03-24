@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+from dtsbuild.agents.refdiff import parse_dts_document
 from dtsbuild.agents.compiler import (
     _compile_direct,
     _render_buttons,
@@ -352,9 +353,12 @@ def test_compile_direct_retains_reference_sections_as_comments_in_noninteractive
 
     asyncio.run(_compile_direct(schema, output_path, ref_path))
     rendered = output_path.read_text(encoding="utf-8")
+    parsed = parse_dts_document(output_path)
 
     assert "no direct evidence confirms that this feature is absent on the target board." in rendered
-    assert "// &wdt {" in rendered
+    assert "/* Retained from public reference" in rendered
+    assert "&wdt {" in rendered
+    assert "/&wdt" not in parsed.node_index()
     assert "lan_sfp: lan_sfp" not in rendered
 
 
@@ -396,7 +400,7 @@ def test_compile_direct_interactive_mode_respects_user_choice_for_reference_rete
     rendered = output_path.read_text(encoding="utf-8")
 
     assert questions
-    assert "// &wdt {" not in rendered
+    assert "&wdt {" not in rendered
 
 
 def test_compile_direct_inserts_missing_property_comment_inside_existing_node(tmp_path):
@@ -434,12 +438,15 @@ def test_compile_direct_inserts_missing_property_comment_inside_existing_node(tm
 
     asyncio.run(_compile_direct(schema, output_path, ref_path))
     rendered = output_path.read_text(encoding="utf-8")
+    parsed = parse_dts_document(output_path)
+    eth_node = parsed.node_index()["/&ethphytop"][0]
 
     assert "&ethphytop {" in rendered
     assert "xphy1-enabled;" in rendered
-    assert "//     xphy3-enabled;" in rendered
-    assert rendered.index("xphy1-enabled;") < rendered.index("//     xphy3-enabled;")
-    assert rendered.index("//     xphy3-enabled;") < rendered.index("enet-phy-lane-swap;")
+    assert "    xphy3-enabled;" in rendered
+    assert rendered.index("xphy1-enabled;") < rendered.index("    xphy3-enabled;")
+    assert rendered.index("    xphy3-enabled;") < rendered.index("enet-phy-lane-swap;")
+    assert "xphy3-enabled" not in eth_node.properties
 
 
 def test_compile_direct_deduplicates_child_retention_when_parent_node_is_retained(tmp_path):
@@ -466,10 +473,12 @@ def test_compile_direct_deduplicates_child_retention_when_parent_node_is_retaine
 
     asyncio.run(_compile_direct(schema, output_path, ref_path))
     rendered = output_path.read_text(encoding="utf-8")
+    parsed = parse_dts_document(output_path)
 
     assert rendered.count("no direct evidence confirms that this feature is absent on the target board.") == 1
-    assert "// &pincontroller {" in rendered
-    assert "//     pincontroller-functions {" in rendered
+    assert "&pincontroller {" in rendered
+    assert "    pincontroller-functions {" in rendered
+    assert "/&pincontroller" not in parsed.node_index()
 
 
 def test_compile_direct_excludes_retained_snippets_that_reference_lan_sfp(tmp_path):
@@ -500,6 +509,6 @@ def test_compile_direct_excludes_retained_snippets_that_reference_lan_sfp(tmp_pa
     asyncio.run(_compile_direct(schema, output_path, ref_path))
     rendered = output_path.read_text(encoding="utf-8")
 
-    assert "// &wdt {" in rendered
+    assert "&wdt {" in rendered
     assert "serdes1 {" not in rendered
     assert "&lan_sfp" not in rendered
