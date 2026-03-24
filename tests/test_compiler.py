@@ -324,3 +324,77 @@ def test_compile_direct_renders_wan_sfp_root_node_and_serdes_reference(tmp_path)
     assert "wan_sfp: wan_sfp {" in rendered
     assert "trx = <&wan_sfp>;" in rendered
     assert rendered.index("wan_sfp: wan_sfp {") < rendered.index("&wan_serdes {")
+
+
+def test_compile_direct_retains_reference_sections_as_comments_in_noninteractive_mode(tmp_path):
+    schema = HardwareSchema(project="TEST", chip="BCM68575")
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                "/dts-v1/;",
+                "",
+                "/ {",
+                "    lan_sfp: lan_sfp {",
+                '        status = "okay";',
+                "    };",
+                "};",
+                "",
+                "&wdt {",
+                '    status = "okay";',
+                "};",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(_compile_direct(schema, output_path, ref_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert "Reference retention (public DTS, comment-only)" in rendered
+    assert "Retained target: /&wdt" in rendered
+    assert " * &wdt {" in rendered
+    assert "lan_sfp: lan_sfp" not in rendered
+
+
+def test_compile_direct_interactive_mode_respects_user_choice_for_reference_retention(tmp_path):
+    schema = HardwareSchema(project="TEST", chip="BCM68575")
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                "/dts-v1/;",
+                "",
+                "/ {",
+                "};",
+                "",
+                "&wdt {",
+                '    status = "okay";',
+                "};",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    questions: list[str] = []
+
+    def _input_handler(request: dict, context: dict | None = None) -> dict:
+        questions.append(str(request.get("question", "")))
+        return {"answer": "不保留，視為明顯不存在", "wasFreeform": False}
+
+    asyncio.run(
+        _compile_direct(
+            schema,
+            output_path,
+            ref_path,
+            interactive=True,
+            input_handler=_input_handler,
+        )
+    )
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert questions
+    assert "Retained target: /&wdt" not in rendered

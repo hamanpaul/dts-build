@@ -12,11 +12,12 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from dtsbuild.pcie_utils import infer_pcie_instances
 from dtsbuild.schema import HardwareSchema, Signal, Device, DtsHint
 from dtsbuild.schema_io import load_schema
+from .refdiff import build_refdiff_report, parse_dts_document
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,13 @@ _RESET_BUTTON_PRESS_TEXT = (
 )
 _RESET_BUTTON_RELEASE_TEXT = "Button Release"
 _I2C0_PINCTRL = "<&bsc_m0_scl_pin_28 &bsc_m0_sda_pin_29>"
+_REFERENCE_RETENTION_EXCLUDE_PATTERNS = (
+    re.compile(r"/lan_sfp(?:/|$)", re.IGNORECASE),
+    re.compile(r"/.*voice", re.IGNORECASE),
+    re.compile(r"bcm_voice", re.IGNORECASE),
+    re.compile(r"slic", re.IGNORECASE),
+    re.compile(r"voip", re.IGNORECASE),
+)
 
 
 def _indent(text: str, level: int = 1) -> str:
@@ -707,12 +715,141 @@ def _render_incomplete_comments(schema: HardwareSchema) -> str:
     return "\n".join(lines)
 
 
+def _should_exclude_reference_target(target: str) -> bool:
+    """Return True for reference-only targets that are clearly absent on this board."""
+    return any(pattern.search(target) for pattern in _REFERENCE_RETENTION_EXCLUDE_PATTERNS)
+
+
+def _retain_reference_candidate(
+    target: str,
+    interactive: bool,
+    input_handler: Callable | None,
+) -> bool:
+    """Decide whether a reference-only section should be kept as a comment."""
+    if not interactive or input_handler is None:
+        return True
+
+    response = input_handler(
+        {
+            "question": (
+                f"公版 DTS 的區段 '{target}' 目前沒有本地證據證明不存在；"
+                "互動模式下是否保留為註解區段？"
+            ),
+            "choices": [
+                "保留為註解",
+                "不保留，視為明顯不存在",
+                "先跳過，不保留",
+            ],
+            "allowFreeform": True,
+        }
+    )
+    answer = str((response or {}).get("answer", "")).strip().lower()
+    if any(token in answer for token in ("不保留", "skip", "跳過", "no")):
+        return False
+    return any(token in answer for token in ("保留", "keep", "retain", "yes", "是"))
+
+
+def _extract_reference_snippet(
+    reference_lines: list[str],
+    reference_doc: Any,
+    target: str,
+) -> list[str]:
+    """Extract a stable node/property snippet from the reference DTS."""
+    node_index = reference_doc.node_index()
+
+    if ":" in target:
+        node_path, prop_name = target.rsplit(":", 1)
+        ref_nodes = node_index.get(node_path, [])
+        if not ref_nodes:
+            return []
+        prop = ref_nodes[0].properties.get(prop_name)
+        if prop is None:
+            return []
+        return [reference_lines[prop.line - 1]]
+
+    ref_nodes = node_index.get(target, [])
+    if not ref_nodes:
+        return []
+    node = ref_nodes[0]
+    if node.end_line is None:
+        return []
+    return reference_lines[node.start_line - 1:node.end_line]
+
+
+def _render_reference_retention_comments(
+    generated_dts_path: Path,
+    ref_dts_path: Path | None,
+    interactive: bool,
+    input_handler: Callable | None,
+) -> str:
+    """Render public-reference snippets as explanatory comments."""
+    if ref_dts_path is None or not ref_dts_path.exists():
+        return ""
+
+    report = build_refdiff_report(
+        project=generated_dts_path.stem,
+        generated_dts_path=generated_dts_path,
+        reference_dts_path=ref_dts_path,
+    )
+    candidates = [
+        candidate
+        for candidate in report.candidates
+        if candidate.candidate_type in {"missing_node", "unsupported_surface", "missing_property"}
+        and candidate.route_hint in {"renderer", "capability"}
+        and not _should_exclude_reference_target(candidate.target)
+    ]
+    if not candidates:
+        return ""
+
+    reference_doc = parse_dts_document(ref_dts_path)
+    reference_lines = ref_dts_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+    lines = [
+        "",
+        "/*",
+        " * ============================================================",
+        " * Reference retention (public DTS, comment-only)",
+        " * ============================================================",
+        " * 非互動模式：沒有反證時保留公版區段作為註解，避免過早刪除。",
+        " * 互動模式：逐筆詢問使用者；未選擇保留的區段不會出現在下列清單。",
+        " * 這些內容僅供人工比對，不是已驗證的 active DTS 事實。",
+        " */",
+    ]
+    rendered_any = False
+
+    for candidate in candidates:
+        if not _retain_reference_candidate(candidate.target, interactive, input_handler):
+            continue
+        snippet = _extract_reference_snippet(reference_lines, reference_doc, candidate.target)
+        if not snippet:
+            continue
+
+        rendered_any = True
+        lines.extend([
+            "",
+            "/*",
+            f" * Retained target: {candidate.target}",
+            f" * Source: {candidate.reference_locator or ref_dts_path.name}",
+            " * Retention reason: 沒有本地證據證明此公版區段不存在，因此先保留為註解。",
+            f" * Diff reason: {candidate.reason}",
+            " * Reference snippet:",
+        ])
+        for snippet_line in snippet:
+            lines.append(f" * {snippet_line}")
+        lines.append(" */")
+
+    return "\n".join(lines) if rendered_any else ""
+
+
 # ── Main compile logic ───────────────────────────────────────────────
 
 async def _compile_direct(
     schema: HardwareSchema,
     output_path: Path,
     ref_dts_path: Path | None = None,
+    *,
+    interactive: bool = False,
+    input_handler: Callable | None = None,
 ) -> Path:
     """Build the DTS file from VERIFIED schema records."""
     verified_sigs = schema.verified_signals()
@@ -799,11 +936,21 @@ async def _compile_direct(
     if todo_block:
         parts.append(todo_block)
 
-    # Assemble and write
+    # Assemble and write the evidence-only base DTS first.
     dts_content = "\n".join(parts) + "\n"
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(dts_content, encoding="utf-8")
+
+    retention_block = _render_reference_retention_comments(
+        generated_dts_path=output_path,
+        ref_dts_path=ref_dts_path,
+        interactive=interactive,
+        input_handler=input_handler,
+    )
+    if retention_block:
+        dts_content += retention_block + "\n"
+        output_path.write_text(dts_content, encoding="utf-8")
 
     logger.info("DTS written to %s (%d bytes)", output_path, len(dts_content))
     return output_path
@@ -816,6 +963,9 @@ async def run_compiler(
     output_path: Path,
     ref_dts_path: Path | None = None,
     mode: str = "direct",
+    *,
+    interactive: bool = False,
+    input_handler: Callable | None = None,
 ) -> Path:
     """
     從 VERIFIED schema record 產出 DTS 檔案。
@@ -841,6 +991,12 @@ async def run_compiler(
         )
 
     if mode == "direct":
-        return await _compile_direct(schema, output_path, ref_dts_path)
+        return await _compile_direct(
+            schema,
+            output_path,
+            ref_dts_path,
+            interactive=interactive,
+            input_handler=input_handler,
+        )
     else:
         raise ValueError(f"Unsupported compiler mode: {mode!r}")
