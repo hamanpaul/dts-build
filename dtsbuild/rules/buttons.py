@@ -3,8 +3,12 @@
 Pattern source: BCM68575 BDK public reference (968575REF1.dts)
   - ``buttons`` node uses ``compatible = "brcm,buttons"``
   - Children: ``reset_button``, ``ses_button``
-  - Each child has ext_irq-gpio, interrupt-parent, interrupts,
-    and press/hold/release sub-nodes.
+  - Each child has ext_irq-gpio, interrupt-parent, interrupts.
+
+Evidence boundary:
+  - Button presence and GPIO wiring come from traced signals.
+  - press/hold/release policy details are not inferred from schematic alone,
+    so this rule does not emit them.
 """
 from __future__ import annotations
 
@@ -71,22 +75,7 @@ class ButtonRule(SubsystemRule):
                     "interrupt-parent": "<&gpioc>",
                     "interrupts": f"<{gpio} IRQ_TYPE_EDGE_FALLING>",
                 },
-                "children": [
-                    {
-                        "node_name": "press",
-                        "properties": {
-                            "print": '"Button Press -- Hold for 5s to do restore to default"',
-                        },
-                    },
-                    {
-                        "node_name": "hold",
-                        "properties": {"rst_to_dflt": "<5>"},
-                    },
-                    {
-                        "node_name": "release",
-                        "properties": {"reset": "<0>"},
-                    },
-                ],
+                "children": [],
             })
 
         for sig in ses_sigs:
@@ -102,21 +91,7 @@ class ButtonRule(SubsystemRule):
                     "interrupt-parent": "<&gpioc>",
                     "interrupts": f"<{gpio} IRQ_TYPE_EDGE_FALLING>",
                 },
-                "children": [
-                    {
-                        "node_name": "press",
-                        "properties": {
-                            "print": '"Session Button pressed"',
-                        },
-                    },
-                    {
-                        "node_name": "release",
-                        "properties": {
-                            "ses_short_period": "<0>",
-                            "ses_long_period": "<3>",
-                        },
-                    },
-                ],
+                "children": [],
             })
 
         if not children:

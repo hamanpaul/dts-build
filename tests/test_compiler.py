@@ -67,17 +67,16 @@ def test_render_power_ctrl_keeps_extra_controls_as_numbered_properties():
     assert "pwr-ctrl-1-gpios = <&gpioc 91 GPIO_ACTIVE_HIGH>;" in rendered
 
 
-def test_render_buttons_adds_deterministic_reset_button_semantics():
+def test_render_buttons_keeps_reset_button_to_evidence_backed_fields():
     rendered = _render_buttons([_sig("RST_BTN", "RESET_BUTTON", "GPIO_48")])
 
     assert "reset_button {" in rendered
     assert "linux,code = <0x198>;" in rendered
-    assert 'print = "Button Press -- Hold for 5s to do restore to default";' in rendered
-    assert "rst_to_dflt = <5>;" in rendered
-    assert "linux,press = <0>;" in rendered
-    assert 'print = "Button Release";' in rendered
-    assert "reset = <0>;" in rendered
-    assert "linux,release = <0>;" in rendered
+    assert "linux,press = <0>;" not in rendered
+    assert "linux,release = <0>;" not in rendered
+    assert "rst_to_dflt =" not in rendered
+    assert "Button Press -- Hold" not in rendered
+    assert "Button Release" not in rendered
 
 
 def test_render_i2c_emits_u41_gpio_expander():

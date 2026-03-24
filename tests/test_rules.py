@@ -105,15 +105,12 @@ class TestButtonRule:
         rst = result.children[0]
         assert rst["node_name"] == "reset_button"
         assert "2" in rst["properties"]["ext_irq-gpio"]
-        # Reset has press, hold, release
-        assert len(rst["children"]) == 3
-        assert rst["children"][0]["node_name"] == "press"
-        assert rst["children"][1]["node_name"] == "hold"
-        assert rst["children"][2]["node_name"] == "release"
+        assert rst["children"] == []
         # Second child is ses_button
         ses = result.children[1]
         assert ses["node_name"] == "ses_button"
         assert "1" in ses["properties"]["ext_irq-gpio"]
+        assert ses["children"] == []
         # Source attribution
         assert "BCM68575" in result.source
 
