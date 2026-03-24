@@ -326,7 +326,7 @@ def test_compile_direct_renders_wan_sfp_root_node_and_serdes_reference(tmp_path)
     assert rendered.index("wan_sfp: wan_sfp {") < rendered.index("&wan_serdes {")
 
 
-def test_compile_direct_retains_reference_sections_as_comments_in_noninteractive_mode(tmp_path):
+def test_compile_direct_retains_reference_sections_as_active_code_in_noninteractive_mode(tmp_path):
     schema = HardwareSchema(project="TEST", chip="BCM68575")
     output_path = tmp_path / "test.dts"
     ref_path = tmp_path / "ref.dts"
@@ -354,7 +354,8 @@ def test_compile_direct_retains_reference_sections_as_comments_in_noninteractive
     rendered = output_path.read_text(encoding="utf-8")
 
     assert "no direct evidence confirms that this feature is absent on the target board." in rendered
-    assert "// &wdt {" in rendered
+    assert "&wdt {" in rendered
+    assert rendered.index("Retained from public reference") < rendered.index("&wdt {")
     assert "lan_sfp: lan_sfp" not in rendered
 
 
@@ -396,7 +397,7 @@ def test_compile_direct_interactive_mode_respects_user_choice_for_reference_rete
     rendered = output_path.read_text(encoding="utf-8")
 
     assert questions
-    assert "// &wdt {" not in rendered
+    assert "&wdt {" not in rendered
 
 
 def test_compile_direct_inserts_missing_property_comment_inside_existing_node(tmp_path):
@@ -437,9 +438,9 @@ def test_compile_direct_inserts_missing_property_comment_inside_existing_node(tm
 
     assert "&ethphytop {" in rendered
     assert "xphy1-enabled;" in rendered
-    assert "//     xphy3-enabled;" in rendered
-    assert rendered.index("xphy1-enabled;") < rendered.index("//     xphy3-enabled;")
-    assert rendered.index("//     xphy3-enabled;") < rendered.index("enet-phy-lane-swap;")
+    assert "    xphy3-enabled;" in rendered
+    assert rendered.index("xphy1-enabled;") < rendered.index("    xphy3-enabled;")
+    assert rendered.index("    xphy3-enabled;") < rendered.index("enet-phy-lane-swap;")
 
 
 def test_compile_direct_deduplicates_child_retention_when_parent_node_is_retained(tmp_path):
@@ -468,5 +469,5 @@ def test_compile_direct_deduplicates_child_retention_when_parent_node_is_retaine
     rendered = output_path.read_text(encoding="utf-8")
 
     assert rendered.count("no direct evidence confirms that this feature is absent on the target board.") == 1
-    assert "// &pincontroller {" in rendered
-    assert "//     pincontroller-functions {" in rendered
+    assert "&pincontroller {" in rendered
+    assert "    pincontroller-functions {" in rendered

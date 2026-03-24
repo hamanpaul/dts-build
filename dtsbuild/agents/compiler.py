@@ -862,7 +862,7 @@ def _build_inline_retention_block(candidate: Any, snippet: list[str]) -> list[st
         ),
     ]
     for snippet_line in snippet:
-        lines.append(f"// {snippet_line}" if snippet_line else "//")
+        lines.append(snippet_line)
     return lines
 
 
@@ -959,7 +959,7 @@ def _apply_inline_reference_retention(
     interactive: bool,
     input_handler: Callable | None,
 ) -> str:
-    """Insert retained public-reference snippets at their original locations as comments."""
+    """Insert retained public-reference snippets with a leading note at original locations."""
     if ref_dts_path is None or not ref_dts_path.exists():
         return generated_dts_path.read_text(encoding="utf-8")
 
