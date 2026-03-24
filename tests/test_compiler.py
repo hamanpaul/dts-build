@@ -353,9 +353,8 @@ def test_compile_direct_retains_reference_sections_as_comments_in_noninteractive
     asyncio.run(_compile_direct(schema, output_path, ref_path))
     rendered = output_path.read_text(encoding="utf-8")
 
-    assert "Reference retention (public DTS, comment-only)" in rendered
-    assert "Retained target: /&wdt" in rendered
-    assert " * &wdt {" in rendered
+    assert "no direct evidence confirms that this feature is absent on the target board." in rendered
+    assert "// &wdt {" in rendered
     assert "lan_sfp: lan_sfp" not in rendered
 
 
@@ -397,4 +396,77 @@ def test_compile_direct_interactive_mode_respects_user_choice_for_reference_rete
     rendered = output_path.read_text(encoding="utf-8")
 
     assert questions
-    assert "Retained target: /&wdt" not in rendered
+    assert "// &wdt {" not in rendered
+
+
+def test_compile_direct_inserts_missing_property_comment_inside_existing_node(tmp_path):
+    schema = HardwareSchema(
+        project="TEST",
+        chip="BCM68575",
+        dts_hints=[
+            DtsHint(
+                target="ethphytop",
+                property="enet-phy-lane-swap",
+                value="GPHY1: Pair 0 swapped",
+                reason="Lane swap detected for GPHY1",
+                provenance=_prov(),
+            )
+        ],
+    )
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                '/dts-v1/;',
+                '',
+                '&ethphytop {',
+                '    xphy1-enabled;',
+                '    xphy3-enabled;',
+                '    enet-phy-lane-swap;',
+                '    status = "okay";',
+                '};',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(_compile_direct(schema, output_path, ref_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert "&ethphytop {" in rendered
+    assert "xphy1-enabled;" in rendered
+    assert "//     xphy3-enabled;" in rendered
+    assert rendered.index("xphy1-enabled;") < rendered.index("//     xphy3-enabled;")
+    assert rendered.index("//     xphy3-enabled;") < rendered.index("enet-phy-lane-swap;")
+
+
+def test_compile_direct_deduplicates_child_retention_when_parent_node_is_retained(tmp_path):
+    schema = HardwareSchema(project="TEST", chip="BCM68575")
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                "/dts-v1/;",
+                "",
+                "&pincontroller {",
+                "    pincontroller-functions {",
+                "        gpio_18_in_pulldown_pin_18: gpio_18_in_pulldown_pin_18_pinconf {",
+                "            pins = <18>;",
+                "        };",
+                "    };",
+                "};",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(_compile_direct(schema, output_path, ref_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert rendered.count("no direct evidence confirms that this feature is absent on the target board.") == 1
+    assert "// &pincontroller {" in rendered
+    assert "//     pincontroller-functions {" in rendered

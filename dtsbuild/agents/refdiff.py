@@ -32,6 +32,13 @@ _RENDER_SURFACES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+def _strip_block_comments_preserving_lines(text: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        return "\n" * match.group(0).count("\n")
+
+    return _COMMENT_BLOCK_RE.sub(_replace, text)
+
+
 @dataclass(slots=True)
 class DtsProperty:
     name: str
@@ -65,7 +72,7 @@ def parse_dts_document(path: Path) -> DtsDocument:
     """Parse a DTS file into a lightweight node/property tree."""
     path = Path(path)
     text = path.read_text(encoding="utf-8", errors="ignore")
-    text = _COMMENT_BLOCK_RE.sub("", text)
+    text = _strip_block_comments_preserving_lines(text)
     total_lines = len(text.splitlines())
     nodes: list[DtsNode] = []
     stack: list[DtsNode] = []

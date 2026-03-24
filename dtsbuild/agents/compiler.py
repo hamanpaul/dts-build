@@ -776,21 +776,49 @@ def _extract_reference_snippet(
     return reference_lines[node.start_line - 1:node.end_line]
 
 
-def _render_reference_retention_comments(
-    generated_dts_path: Path,
-    ref_dts_path: Path | None,
+def _target_node_path(target: str) -> str:
+    if ":" in target:
+        return target.rsplit(":", 1)[0]
+    return target
+
+
+def _reference_target_line(reference_doc: Any, target: str) -> int | None:
+    node_index = reference_doc.node_index()
+    if ":" in target:
+        node_path, prop_name = target.rsplit(":", 1)
+        ref_nodes = node_index.get(node_path, [])
+        if not ref_nodes:
+            return None
+        prop = ref_nodes[0].properties.get(prop_name)
+        return prop.line if prop is not None else None
+
+    ref_nodes = node_index.get(target, [])
+    if not ref_nodes:
+        return None
+    return ref_nodes[0].start_line
+
+
+def _parent_node_path(path: str) -> str | None:
+    if path == "/":
+        return None
+    parent = path.rsplit("/", 1)[0]
+    return parent or "/"
+
+
+def _is_descendant_path(path: str, ancestor: str) -> bool:
+    if path == ancestor:
+        return True
+    if ancestor == "/":
+        return path.startswith("/") and path != "/"
+    return path.startswith(f"{ancestor}/")
+
+
+def _select_reference_retention_candidates(
+    report: Any,
+    reference_doc: Any,
     interactive: bool,
     input_handler: Callable | None,
-) -> str:
-    """Render public-reference snippets as explanatory comments."""
-    if ref_dts_path is None or not ref_dts_path.exists():
-        return ""
-
-    report = build_refdiff_report(
-        project=generated_dts_path.stem,
-        generated_dts_path=generated_dts_path,
-        reference_dts_path=ref_dts_path,
-    )
+) -> list[Any]:
     candidates = [
         candidate
         for candidate in report.candidates
@@ -799,46 +827,204 @@ def _render_reference_retention_comments(
         and not _should_exclude_reference_target(candidate.target)
     ]
     if not candidates:
-        return ""
+        return []
 
-    reference_doc = parse_dts_document(ref_dts_path)
-    reference_lines = ref_dts_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    ordered = sorted(
+        candidates,
+        key=lambda candidate: (
+            _reference_target_line(reference_doc, candidate.target) or 10**9,
+            candidate.target,
+        ),
+    )
+    retained: list[Any] = []
+    retained_node_paths: list[str] = []
 
-    lines = [
-        "",
-        "/*",
-        " * ============================================================",
-        " * Reference retention (public DTS, comment-only)",
-        " * ============================================================",
-        " * 非互動模式：沒有反證時保留公版區段作為註解，避免過早刪除。",
-        " * 互動模式：逐筆詢問使用者；未選擇保留的區段不會出現在下列清單。",
-        " * 這些內容僅供人工比對，不是已驗證的 active DTS 事實。",
-        " */",
-    ]
-    rendered_any = False
-
-    for candidate in candidates:
+    for candidate in ordered:
+        target_path = _target_node_path(candidate.target)
+        if any(_is_descendant_path(target_path, ancestor) for ancestor in retained_node_paths):
+            continue
         if not _retain_reference_candidate(candidate.target, interactive, input_handler):
             continue
+        retained.append(candidate)
+        if candidate.candidate_type in {"missing_node", "unsupported_surface"}:
+            retained_node_paths.append(target_path)
+
+    return retained
+
+
+def _build_inline_retention_block(candidate: Any, snippet: list[str]) -> list[str]:
+    source = candidate.reference_locator or "public reference"
+    lines = [
+        "",
+        (
+            f"// Retained from public reference ({source}): "
+            "no direct evidence confirms that this feature is absent on the target board."
+        ),
+    ]
+    for snippet_line in snippet:
+        lines.append(f"// {snippet_line}" if snippet_line else "//")
+    return lines
+
+
+def _find_property_insertion_line(
+    generated_doc: Any,
+    reference_doc: Any,
+    target: str,
+) -> int | None:
+    if ":" not in target:
+        return None
+
+    node_path, prop_name = target.rsplit(":", 1)
+    generated_nodes = generated_doc.node_index().get(node_path, [])
+    reference_nodes = reference_doc.node_index().get(node_path, [])
+    if not generated_nodes or not reference_nodes:
+        return None
+
+    generated_node = generated_nodes[0]
+    reference_node = reference_nodes[0]
+    reference_prop = reference_node.properties.get(prop_name)
+    if reference_prop is None:
+        return None
+
+    next_generated_prop_line: int | None = None
+    for sibling_name, sibling_prop in sorted(
+        reference_node.properties.items(),
+        key=lambda item: item[1].line,
+    ):
+        if sibling_prop.line <= reference_prop.line:
+            continue
+        generated_prop = generated_node.properties.get(sibling_name)
+        if generated_prop is None:
+            continue
+        next_generated_prop_line = generated_prop.line
+        break
+
+    if next_generated_prop_line is not None:
+        return next_generated_prop_line
+    return generated_node.end_line
+
+
+def _find_node_insertion_line(
+    generated_doc: Any,
+    reference_doc: Any,
+    target: str,
+    total_lines: int,
+) -> int:
+    target_path = _target_node_path(target)
+    parent_path = _parent_node_path(target_path)
+    if parent_path is None:
+        return total_lines + 1
+
+    reference_index = reference_doc.node_index()
+    generated_index = generated_doc.node_index()
+    reference_nodes = reference_index.get(target_path, [])
+    if not reference_nodes:
+        return total_lines + 1
+    reference_node = reference_nodes[0]
+
+    sibling_nodes = sorted(
+        [
+            node
+            for nodes in reference_index.values()
+            for node in nodes
+            if _parent_node_path(node.path) == parent_path
+        ],
+        key=lambda node: node.start_line,
+    )
+
+    for sibling in sibling_nodes:
+        if sibling.path == target_path or sibling.start_line <= reference_node.start_line:
+            continue
+        generated_nodes = generated_index.get(sibling.path, [])
+        if generated_nodes:
+            return generated_nodes[0].start_line
+
+    for sibling in reversed(sibling_nodes):
+        if sibling.path == target_path or sibling.start_line >= reference_node.start_line:
+            continue
+        generated_nodes = generated_index.get(sibling.path, [])
+        if generated_nodes:
+            prev_node = generated_nodes[0]
+            return (prev_node.end_line or prev_node.start_line) + 1
+
+    parent_nodes = generated_index.get(parent_path, [])
+    if parent_nodes:
+        return parent_nodes[0].end_line or (total_lines + 1)
+    return total_lines + 1
+
+
+def _apply_inline_reference_retention(
+    generated_dts_path: Path,
+    ref_dts_path: Path | None,
+    interactive: bool,
+    input_handler: Callable | None,
+) -> str:
+    """Insert retained public-reference snippets at their original locations as comments."""
+    if ref_dts_path is None or not ref_dts_path.exists():
+        return generated_dts_path.read_text(encoding="utf-8")
+
+    report = build_refdiff_report(
+        project=generated_dts_path.stem,
+        generated_dts_path=generated_dts_path,
+        reference_dts_path=ref_dts_path,
+    )
+    reference_doc = parse_dts_document(ref_dts_path)
+    candidates = _select_reference_retention_candidates(
+        report=report,
+        reference_doc=reference_doc,
+        interactive=interactive,
+        input_handler=input_handler,
+    )
+    if not candidates:
+        return generated_dts_path.read_text(encoding="utf-8")
+
+    generated_content = generated_dts_path.read_text(encoding="utf-8")
+    generated_lines = generated_content.splitlines()
+    generated_doc = parse_dts_document(generated_dts_path)
+    reference_lines = ref_dts_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    insertions: list[tuple[int, int, list[str]]] = []
+
+    for candidate in candidates:
         snippet = _extract_reference_snippet(reference_lines, reference_doc, candidate.target)
         if not snippet:
             continue
 
-        rendered_any = True
-        lines.extend([
-            "",
-            "/*",
-            f" * Retained target: {candidate.target}",
-            f" * Source: {candidate.reference_locator or ref_dts_path.name}",
-            " * Retention reason: 沒有本地證據證明此公版區段不存在，因此先保留為註解。",
-            f" * Diff reason: {candidate.reason}",
-            " * Reference snippet:",
-        ])
-        for snippet_line in snippet:
-            lines.append(f" * {snippet_line}")
-        lines.append(" */")
+        if candidate.candidate_type == "missing_property":
+            insertion_line = _find_property_insertion_line(
+                generated_doc=generated_doc,
+                reference_doc=reference_doc,
+                target=candidate.target,
+            )
+        else:
+            insertion_line = _find_node_insertion_line(
+                generated_doc=generated_doc,
+                reference_doc=reference_doc,
+                target=candidate.target,
+                total_lines=len(generated_lines),
+            )
+        if insertion_line is None:
+            continue
 
-    return "\n".join(lines) if rendered_any else ""
+        insertions.append(
+            (
+                insertion_line,
+                _reference_target_line(reference_doc, candidate.target) or 10**9,
+                _build_inline_retention_block(candidate, snippet),
+            )
+        )
+
+    if not insertions:
+        return generated_content
+
+    for insertion_line, reference_line, block in sorted(
+        insertions,
+        key=lambda item: (item[0], item[1]),
+        reverse=True,
+    ):
+        insert_at = max(0, min(insertion_line - 1, len(generated_lines)))
+        generated_lines[insert_at:insert_at] = block
+
+    return "\n".join(generated_lines) + "\n"
 
 
 # ── Main compile logic ───────────────────────────────────────────────
@@ -942,15 +1128,13 @@ async def _compile_direct(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(dts_content, encoding="utf-8")
 
-    retention_block = _render_reference_retention_comments(
+    dts_content = _apply_inline_reference_retention(
         generated_dts_path=output_path,
         ref_dts_path=ref_dts_path,
         interactive=interactive,
         input_handler=input_handler,
     )
-    if retention_block:
-        dts_content += retention_block + "\n"
-        output_path.write_text(dts_content, encoding="utf-8")
+    output_path.write_text(dts_content, encoding="utf-8")
 
     logger.info("DTS written to %s (%d bytes)", output_path, len(dts_content))
     return output_path
