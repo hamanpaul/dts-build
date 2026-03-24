@@ -544,3 +544,42 @@ def test_compile_direct_excludes_retained_snippets_that_reference_lan_sfp(tmp_pa
     assert "&wdt {" in rendered
     assert "serdes1 {" not in rendered
     assert "&lan_sfp" not in rendered
+
+
+def test_compile_direct_excludes_retained_i2c1_reference_block(tmp_path):
+    schema = HardwareSchema(
+        project="TEST",
+        chip="BCM68575",
+        signals=[
+            _sig("RBR", "RESET_BUTTON", "GPIO_48"),
+            _sig("2G_PEWAKE", "PCIE_WIFI", "GPIO_58"),
+        ],
+    )
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                "/dts-v1/;",
+                "",
+                "&i2c1 {",
+                "    pinctrl-0 = <&b_bsc_m1_sda_pin_58 &b_bsc_m1_scl_pin_48>;",
+                '    pinctrl-names = "default";',
+                '    status = "okay";',
+                "};",
+                "",
+                "&wdt {",
+                '    status = "okay";',
+                "};",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(_compile_direct(schema, output_path, ref_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert "&wdt {" in rendered
+    assert "&i2c1 {" not in rendered
+    assert "b_bsc_m1_sda_pin_58" not in rendered

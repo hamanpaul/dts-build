@@ -811,9 +811,49 @@ def _target_node_path(target: str) -> str:
     return target
 
 
-def _should_exclude_reference_snippet(snippet: list[str]) -> bool:
+def _should_exclude_reference_i2c1_snippet(
+    snippet_text: str,
+    signals: list[Signal],
+) -> bool:
+    if "&i2c1" not in snippet_text:
+        return False
+
+    gpio_pins = {
+        pin
+        for pin in re.findall(r"b_bsc_m1_(?:sda|scl)_pin_(\d+)", snippet_text, re.IGNORECASE)
+    }
+    if not gpio_pins:
+        return False
+
+    signal_names_by_gpio: dict[str, list[Signal]] = {pin: [] for pin in gpio_pins}
+    for signal in signals:
+        gpio = _extract_gpio_num(signal.soc_pin)
+        if gpio in signal_names_by_gpio:
+            signal_names_by_gpio[gpio].append(signal)
+
+    if any(not matches for matches in signal_names_by_gpio.values()):
+        return False
+
+    def _looks_i2c_signal(signal: Signal) -> bool:
+        upper_name = signal.name.upper()
+        upper_role = signal.role.upper()
+        return "I2C" in upper_role or "SCL" in upper_name or "SDA" in upper_name
+
+    return all(
+        not any(_looks_i2c_signal(signal) for signal in matches)
+        for matches in signal_names_by_gpio.values()
+    )
+
+
+def _should_exclude_reference_snippet(
+    snippet: list[str],
+    signals: list[Signal],
+) -> bool:
     snippet_text = "\n".join(snippet)
-    return any(pattern.search(snippet_text) for pattern in _REFERENCE_RETENTION_EXCLUDE_SNIPPET_PATTERNS)
+    return (
+        any(pattern.search(snippet_text) for pattern in _REFERENCE_RETENTION_EXCLUDE_SNIPPET_PATTERNS)
+        or _should_exclude_reference_i2c1_snippet(snippet_text, signals)
+    )
 
 
 def _escape_block_comment_text(line: str) -> str:
@@ -995,6 +1035,7 @@ def _find_node_insertion_line(
 def _apply_inline_reference_retention(
     generated_dts_path: Path,
     ref_dts_path: Path | None,
+    signals: list[Signal],
     interactive: bool,
     input_handler: Callable | None,
 ) -> str:
@@ -1027,7 +1068,7 @@ def _apply_inline_reference_retention(
         snippet = _extract_reference_snippet(reference_lines, reference_doc, candidate.target)
         if not snippet:
             continue
-        if _should_exclude_reference_snippet(snippet):
+        if _should_exclude_reference_snippet(snippet, signals):
             continue
 
         if candidate.candidate_type == "missing_property":
@@ -1172,6 +1213,7 @@ async def _compile_direct(
     dts_content = _apply_inline_reference_retention(
         generated_dts_path=output_path,
         ref_dts_path=ref_dts_path,
+        signals=verified_sigs,
         interactive=interactive,
         input_handler=input_handler,
     )
