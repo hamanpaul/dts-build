@@ -13,6 +13,13 @@ description: >
 dts-build 是一個用於從硬體設計資料自動產生 Device Tree Source (DTS) 檔案的工具。
 專為 Broadcom BCM68575 (BGW720 等) 平台設計。
 
+若要把這套能力拆成可安裝 skill，請另外參考：
+
+- `skills/schematic-reasoner/SKILL.md`
+- `skills/schematic-reasoner/references/analysis-playbook.md`
+- `skills/gen-dts/SKILL.md`
+- `skills/gen-dts/references/dts-generation-playbook.md`
+
 ## 核心原則
 
 1. **證據驅動** — 所有 DTS 內容必須可追溯至電路圖、GPIO table 或 datasheet

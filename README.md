@@ -21,6 +21,13 @@
 
 第一階段先以 **BCM68575** 為主。
 
+若要看把本次 BGW720 tracing 經驗抽象成可重用 skill 的設計稿，請看：
+
+- `skills/schematic-reasoner/SKILL.md`
+- `skills/schematic-reasoner/references/analysis-playbook.md`
+- `skills/gen-dts/SKILL.md`
+- `skills/gen-dts/references/dts-generation-playbook.md`
+
 ## Parser 策略
 
 - 預設 backend：`auto`
