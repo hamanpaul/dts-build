@@ -61,7 +61,7 @@ def test_run_calibration_workflow_writes_refdiff_and_calibration_sidecars(tmp_pa
 };
 
 &cpufreq {
-    status = "okay";
+    op-mode = "dvfs";
 };
 """,
     )

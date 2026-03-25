@@ -14,8 +14,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+from dtsbuild.pcie_utils import (
+    gpio_row_signal_name,
+    is_grouped_pcie_wifi_power_signal,
+    is_pcie_wifi_signal_name,
+)
 from dtsbuild.schema import HardwareSchema, Provenance
 from dtsbuild.schema_io import save_schema, load_schema
+from dtsbuild.tables import read_table_rows
 from .tools.tracing import (
     trace_net, trace_cross_pdf,
     detect_lane_swap, lookup_refdes,
@@ -33,7 +39,7 @@ _ROLE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"LED", re.IGNORECASE), "LED"),
     (re.compile(r"^GPHY|^SGMII", re.IGNORECASE), "ETHERNET_PHY"),
     (re.compile(r"^RBR\b", re.IGNORECASE), "RESET_BUTTON"),
-    (re.compile(r"^PCIE|^RF_", re.IGNORECASE), "PCIE_WIFI"),
+    (re.compile(r"^PCIE|^RF_|GRFIC", re.IGNORECASE), "PCIE_WIFI"),
     (re.compile(r"^I2C|^SCL|^SDA", re.IGNORECASE), "I2C"),
     (re.compile(r"^USB", re.IGNORECASE), "USB"),
     (re.compile(r"PS_EN$|PWR", re.IGNORECASE), "POWER_CONTROL"),
@@ -238,6 +244,8 @@ def _determine_device_status(
 
 def _classify_signal_role(signal_name: str) -> str:
     """Classify a GPIO signal name into a semantic role."""
+    if is_pcie_wifi_signal_name(signal_name):
+        return "PCIE_WIFI"
     for pattern, role in _ROLE_PATTERNS:
         if pattern.search(signal_name):
             return role
@@ -249,21 +257,406 @@ def _classify_signal_role(signal_name: str) -> str:
 def _read_gpio_table(gpio_table: Path) -> list[dict[str, str]]:
     """Read the GPIO table CSV and return rows with a usable signal name.
 
-    Skips rows where signal is empty, 'NA', or where name is 'Not used'.
+    Keeps BGW720 PCIe/Wi-Fi rows whose effective label may live in ``name``
+    instead of ``signal``.
     """
     rows: list[dict[str, str]] = []
     with open(gpio_table, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
-            sig = (row.get("signal") or "").strip()
+            sig = gpio_row_signal_name(row)
             name = (row.get("name") or "").strip()
-            # Skip empty / placeholder rows
-            if not sig or sig == "NA":
+            if not sig:
                 continue
-            if name.lower() == "not used":
+            if name.lower() == "not used" and not is_pcie_wifi_signal_name(sig):
                 continue
             rows.append(row)
     return rows
+
+
+def _read_blockdiag_table(blockdiag_table: Path) -> list[dict[str, str]]:
+    """Read optional block diagram CSV rows."""
+    if not blockdiag_table.exists():
+        return []
+    with open(blockdiag_table, newline="", encoding="utf-8-sig") as fh:
+        return list(csv.DictReader(fh))
+
+
+def _read_optional_table(path: Path | None) -> list[dict[str, str]]:
+    if path is None or not path.exists():
+        return []
+    return read_table_rows(path)
+
+
+def _has_present_truth(row: dict[str, str]) -> bool:
+    return (row.get("present") or "").strip().lower() in {"true", "yes", "1", "y"}
+
+
+def _proven_network_gphy_prefixes(network_rows: list[dict[str, str]]) -> set[str]:
+    prefixes: set[str] = set()
+    for row in network_rows:
+        if not _has_present_truth(row):
+            continue
+        phy_handle = (row.get("phy_handle") or "").strip().lower()
+        match = re.fullmatch(r"gphy(\d+)", phy_handle)
+        if match:
+            prefixes.add(f"GPHY{match.group(1)}")
+    return prefixes
+
+
+def _lane_swap_candidate_gphy_prefixes(network_rows: list[dict[str, str]]) -> set[str]:
+    prefixes: set[str] = set()
+    for row in network_rows:
+        present = (row.get("present") or "").strip().lower()
+        if present not in {"true", "yes", "1", "y", "inferred"}:
+            continue
+        phy_handle = (row.get("phy_handle") or "").strip().lower()
+        match = re.fullmatch(r"gphy(\d+)", phy_handle)
+        if match:
+            prefixes.add(f"GPHY{match.group(1)}")
+    return prefixes
+
+
+def _network_row_provenance(row: dict[str, str]) -> dict[str, Any]:
+    source = (row.get("source") or "").strip()
+    pdf_id = source.split(":", 1)[0] if source else "network_table"
+    page_match = re.search(r"pages?\s+([0-9,\s]+)", source, re.IGNORECASE)
+    if page_match:
+        pages = [int(match) for match in re.findall(r"\d+", page_match.group(1))] or [0]
+    else:
+        pages = [0]
+    refs = [
+        value
+        for value in (
+            row.get("name", "").strip(),
+            row.get("phy_handle", "").strip(),
+            row.get("switch_port", "").strip(),
+        )
+        if value
+    ]
+    return {
+        "pdfs": [pdf_id],
+        "pages": pages,
+        "refs": refs,
+        "method": "network_table",
+        "confidence": 0.8,
+    }
+
+
+def _audit_network_topology(network_rows: list[dict[str, str]], schema_path: str) -> None:
+    wrote_xport = False
+
+    for row in network_rows:
+        if not _has_present_truth(row):
+            continue
+
+        name = (row.get("name") or "").strip()
+        role = (row.get("role") or "").strip()
+        phy_handle = (row.get("phy_handle") or "").strip().lower()
+        phy_group = (row.get("phy_group") or "").strip()
+        switch_port = (row.get("switch_port") or "").strip()
+        provenance = _network_row_provenance(row)
+
+        if switch_port:
+            write_dts_hint(
+                schema_path=schema_path,
+                target=f"&switch0/ports/{switch_port}",
+                property="status",
+                value='"okay"',
+                reason=(
+                    f"Stable topology row {name or switch_port}: role={role or 'UNKNOWN'}, "
+                    f"phy_handle={phy_handle or 'UNKNOWN'}, phy_group={phy_group or 'UNKNOWN'}"
+                ),
+                provenance=provenance,
+            )
+
+        gphy_match = re.fullmatch(r"gphy(\d+)", phy_handle)
+        if gphy_match:
+            write_dts_hint(
+                schema_path=schema_path,
+                target="&ethphytop",
+                property=f"xphy{int(gphy_match.group(1))}-enabled",
+                reason=(
+                    f"Stable topology row {name or phy_handle}: switch_port={switch_port or 'UNKNOWN'}, "
+                    f"phy_group={phy_group or 'UNKNOWN'}"
+                ),
+                provenance=provenance,
+            )
+
+        if not wrote_xport:
+            write_dts_hint(
+                schema_path=schema_path,
+                target="&xport",
+                property="status",
+                value='"okay"',
+                reason="Stable network topology confirms Ethernet transport is used on this board.",
+                provenance=provenance,
+            )
+            wrote_xport = True
+
+
+def _write_gpio_table_signal(
+    signal_name: str,
+    gpio_pin: str,
+    role: str,
+    schema_path: str,
+) -> None:
+    """Record a signal that is directly evidenced by the GPIO table itself."""
+    write_signal(
+        schema_path=schema_path,
+        name=signal_name,
+        soc_pin=gpio_pin,
+        traced_path=f"{signal_name} ↔ {gpio_pin} (GPIO table)",
+        role=role,
+        status="VERIFIED",
+        provenance={
+            "pdfs": ["gpio_table"],
+            "pages": [0],
+            "refs": [],
+            "method": "gpio_table",
+            "confidence": 0.8,
+        },
+    )
+    logger.debug("Recorded %s from GPIO table evidence (%s)", signal_name, role)
+
+
+def _infer_soc_pin_from_line(line: str, token: str) -> str | None:
+    """Best-effort extraction of the SoC pad token nearest to *token*."""
+    token_match = re.search(re.escape(token), line, re.IGNORECASE)
+    if token_match is None:
+        return None
+
+    pad_matches = list(re.finditer(r"\b[A-Z]{1,2}\d{1,2}\b", line))
+    if not pad_matches:
+        return None
+
+    after = [m.group(0) for m in pad_matches if m.start() >= token_match.end()]
+    if after:
+        return after[0]
+
+    before = [m.group(0) for m in pad_matches if m.end() <= token_match.start()]
+    if before:
+        return before[-1]
+    return None
+
+
+def _find_token_occurrence(
+    indices: dict[str, Any],
+    token: str,
+) -> tuple[str, int, str] | None:
+    """Return the first ``(pdf_id, page_num, line)`` containing *token*."""
+    needle = token.upper()
+    for pdf_id in _all_pdf_ids(indices):
+        for page_num, content in _pages_for(indices, pdf_id).items():
+            for line in content.splitlines():
+                if needle in line.upper():
+                    return pdf_id, int(page_num), line
+    return None
+
+
+def _find_page_with_tokens(
+    indices: dict[str, Any],
+    pdf_id: str,
+    required_tokens: tuple[str, ...],
+) -> tuple[int, str] | None:
+    """Return the first page whose content contains all *required_tokens*."""
+    for page_num, content in _pages_for(indices, pdf_id).items():
+        haystack = content.upper()
+        if all(token.upper() in haystack for token in required_tokens):
+            return int(page_num), content
+    return None
+
+
+def _audit_usb_presence(
+    indices: dict[str, Any],
+    blockdiag_table: Path | None,
+    schema_path: str,
+) -> None:
+    """Record minimal USB host evidence from blockdiag + schematic page text."""
+    if blockdiag_table is None:
+        return
+
+    usb_rows = [
+        row for row in _read_blockdiag_table(blockdiag_table)
+        if str(row.get("domain", "")).strip().lower() == "usb"
+        and str(row.get("present", "")).strip().lower() in {"true", "1", "yes"}
+    ]
+    if not usb_rows:
+        return
+
+    required_tokens = (
+        ("USB0_PWRON_N", "USB_POWER"),
+        ("USB1_PWRON", "USB_POWER"),
+        ("USB0_SSRXN", "USB_SUPERSPEED"),
+    )
+    evidence: list[tuple[str, str, str, int, str, str]] = []
+    for token, role in required_tokens:
+        hit = _find_token_occurrence(indices, token)
+        if hit is None:
+            logger.info("USB audit skipped: missing schematic token %s", token)
+            return
+        pdf_id, page_num, line = hit
+        soc_pin = _infer_soc_pin_from_line(line, token)
+        if soc_pin is None:
+            logger.info("USB audit skipped: unable to infer SoC pin for %s", token)
+            return
+        evidence.append((token, role, pdf_id, page_num, line, soc_pin))
+
+    for token, role, pdf_id, page_num, _line, soc_pin in evidence:
+        write_signal(
+            schema_path=schema_path,
+            name=token,
+            soc_pin=soc_pin,
+            traced_path=f"{token} ↔ {soc_pin} (USB schematic page {page_num})",
+            role=role,
+            status="VERIFIED",
+            provenance={
+                "pdfs": [pdf_id, "blockdiag_table"],
+                "pages": [page_num, 0],
+                "refs": [token],
+                "method": "blockdiag+page_scan",
+                "confidence": 0.76,
+            },
+        )
+    logger.info("Recorded %d USB signals from blockdiag + schematic evidence", len(evidence))
+
+
+def _audit_usb_port_policy(
+    indices: dict[str, Any],
+    schema_path: str,
+) -> None:
+    """Record usb_ctrl port policy when only the USB0 external path is populated."""
+    hit = _find_page_with_tokens(
+        indices,
+        "mainboard",
+        (
+            "USB0_VBUS",
+            "USB0_DP",
+            "USB0_DM",
+            "USB0_SSRXN",
+            "USB1_DP",
+            "USB1_DM",
+            "USB1_ID",
+            "USB1_PWRON",
+        ),
+    )
+    if hit is None:
+        return
+
+    page_num, content = hit
+    haystack = content.upper()
+    if any(token in haystack for token in ("USB1_VBUS", "USB1_SSRXN", "USB1_SSTXN", "USB1_SSTXP")):
+        return
+
+    write_dts_hint(
+        schema_path=schema_path,
+        target="&usb_ctrl",
+        property="port1-disabled",
+        reason=(
+            "Mainboard USB page shows a populated USB0 connector/power path, "
+            "while the USB1 lane has no matching VBUS or superspeed path."
+        ),
+        provenance={
+            "pdfs": ["mainboard"],
+            "pages": [page_num],
+            "refs": [
+                "USB0_VBUS",
+                "USB0_DP",
+                "USB0_DM",
+                "USB0_SSRXN",
+                "USB1_DP",
+                "USB1_DM",
+                "USB1_ID",
+                "USB1_PWRON",
+            ],
+            "method": "page_scan",
+            "confidence": 0.74,
+        },
+    )
+    logger.info("Recorded usb_ctrl port1-disabled hint from mainboard page %d", page_num)
+
+
+def _audit_uart_presence(
+    indices: dict[str, Any],
+    schema_path: str,
+) -> None:
+    """Record uart0 evidence only when TX/RX and 4-pin header context co-occur."""
+    hit = _find_page_with_tokens(
+        indices,
+        "mainboard",
+        ("UART0_SOUT", "UART0_SIN", "GPIO_14", "GPIO_15", "P301V-04-SMT-G1-RT"),
+    )
+    if hit is None:
+        return
+
+    page_num, _content = hit
+    for signal_name, soc_pin in (
+        ("UART0_SOUT", "GPIO_14"),
+        ("UART0_SIN", "GPIO_15"),
+    ):
+        write_signal(
+            schema_path=schema_path,
+            name=signal_name,
+            soc_pin=soc_pin,
+            traced_path=(
+                f"{signal_name} ↔ {soc_pin} (mainboard page {page_num}, "
+                "4-pin header context)"
+            ),
+            role="UART",
+            status="VERIFIED",
+            provenance={
+                "pdfs": ["mainboard"],
+                "pages": [page_num],
+                "refs": ["P301V-04-SMT-G1-RT"],
+                "method": "page_scan",
+                "confidence": 0.72,
+            },
+        )
+    logger.info("Recorded uart0 TX/RX from mainboard page %d header context", page_num)
+
+
+def _audit_wan_sfp_i2c_bus(
+    indices: dict[str, Any],
+    schema_path: str,
+) -> None:
+    """Record wan_sfp i2c-bus when SFP cage I2C wiring is explicit in schematic OCR."""
+    hit = _find_page_with_tokens(
+        indices,
+        "mainboard",
+        ("U6", "I2C ADDRESS", "0XA0/A2", "SFP_SCL", "SFP_SDA"),
+    )
+    if hit is None:
+        return
+
+    page_num, content = hit
+    haystack = content.upper()
+    bus_num: str | None = None
+    for pattern in (r"\bSDA[_\s-]?(\d+)\b", r"\bSCL[_\s-]?(\d+)\b"):
+        match = re.search(pattern, haystack)
+        if match:
+            bus_num = match.group(1)
+            break
+    if bus_num is None:
+        return
+
+    write_dts_hint(
+        schema_path=schema_path,
+        target="wan_sfp",
+        property="i2c-bus",
+        value=f"<&i2c{bus_num}>",
+        reason=(
+            "SFP cage U6 exposes EEPROM I2C address 0xA0/A2 and the schematic "
+            f"routes SFP_SCL/SFP_SDA to i2c{bus_num}."
+        ),
+        provenance={
+            "pdfs": ["mainboard"],
+            "pages": [page_num],
+            "refs": ["U6", "SFP_SCL", "SFP_SDA", f"SDA_{bus_num}", "0xA0/A2"],
+            "method": "page_scan",
+            "confidence": 0.78,
+        },
+    )
+    logger.info("Recorded wan_sfp i2c-bus hint from mainboard page %d", page_num)
 
 
 # ── Schema bootstrap ────────────────────────────────────────────────
@@ -605,6 +998,8 @@ def _trace_signal(
 def _audit_gphy_lane_swap(
     indices: dict[str, Any],
     schema_path: str,
+    *,
+    allowed_prefixes: set[str] | None = None,
 ) -> None:
     """Detect lane swaps for all GPHY groups and write hints."""
     tag_index = indices.get("tag_index", {})
@@ -620,6 +1015,12 @@ def _audit_gphy_lane_swap(
     if not gphy_prefixes:
         logger.info("No GPHY signals found in tag index — skipping lane swap detection")
         return
+
+    if allowed_prefixes is not None:
+        gphy_prefixes &= allowed_prefixes
+        if not gphy_prefixes:
+            logger.info("No GPHY lane-swap candidates are available from network rows — skipping lane swap detection")
+            return
 
     for prefix in sorted(gphy_prefixes):
         # Run lane swap detection in each PDF that has these signals
@@ -650,7 +1051,7 @@ def _audit_gphy_lane_swap(
 
                 write_dts_hint(
                     schema_path=schema_path,
-                    target="ethphytop",
+                    target=f"&mdio_bus/xphy{prefix.removeprefix('GPHY')}",
                     property="enet-phy-lane-swap",
                     value=f"{prefix}: {result['swap_detail']}",
                     reason=f"Lane swap detected for {prefix}: {result['swap_detail']}",
@@ -766,6 +1167,9 @@ async def _audit_direct(
     indices: dict[str, Any],
     gpio_rows: list[dict[str, str]],
     schema_path: Path,
+    *,
+    blockdiag_table: Path | None = None,
+    network_table: Path | None = None,
 ) -> None:
     """Systematically trace every GPIO signal and write results."""
     sp = str(schema_path)
@@ -774,9 +1178,9 @@ async def _audit_direct(
 
     # 1. Trace each signal from the GPIO table
     for row in gpio_rows:
-        signal_name = (row.get("signal") or "").strip()
+        signal_name = gpio_row_signal_name(row)
         gpio_pin = (row.get("pin_or_gpio") or "").strip()
-        if not signal_name or signal_name == "NA":
+        if not signal_name:
             continue
 
         signal_aliases = [
@@ -788,6 +1192,9 @@ async def _audit_direct(
         signal_name = signal_aliases[0]
 
         role = _classify_signal_role(signal_name)
+        if is_grouped_pcie_wifi_power_signal(signal_name):
+            _write_gpio_table_signal(signal_name, gpio_pin, role, sp)
+            continue
         try:
             _trace_signal(
                 signal_name,
@@ -816,11 +1223,20 @@ async def _audit_direct(
                 },
             )
 
-    # 2. GPHY lane swap detection
-    logger.info("Running GPHY lane swap detection")
-    _audit_gphy_lane_swap(indices, sp)
+    network_rows = _read_optional_table(network_table)
 
-    # 3. Device audit
+    # 2. Supplemental non-GPIO subsystem evidence
+    _audit_usb_presence(indices, blockdiag_table, sp)
+    _audit_usb_port_policy(indices, sp)
+    _audit_uart_presence(indices, sp)
+    _audit_wan_sfp_i2c_bus(indices, sp)
+    _audit_network_topology(network_rows, sp)
+
+    # 3. GPHY lane swap detection
+    logger.info("Running GPHY lane swap detection")
+    _audit_gphy_lane_swap(indices, sp, allowed_prefixes=_lane_swap_candidate_gphy_prefixes(network_rows))
+
+    # 4. Device audit
     logger.info("Running device audit")
     _audit_devices(indices, sp)
 
@@ -852,12 +1268,26 @@ async def run_auditor(
     _ensure_schema(schema_path)
     _reset_schema(schema_path)
     gpio_rows = _read_gpio_table(gpio_table)
+    blockdiag_table = gpio_table.parent / "blockdiag.csv"
+    network_table = gpio_table.parent / "network.csv"
     logger.info("Read %d usable rows from %s", len(gpio_rows), gpio_table)
 
     if mode == "direct":
-        await _audit_direct(indices, gpio_rows, schema_path)
+        await _audit_direct(
+            indices,
+            gpio_rows,
+            schema_path,
+            blockdiag_table=blockdiag_table,
+            network_table=network_table,
+        )
     elif mode == "agent":
         logger.warning("Agent mode not yet implemented, falling back to direct")
-        await _audit_direct(indices, gpio_rows, schema_path)
+        await _audit_direct(
+            indices,
+            gpio_rows,
+            schema_path,
+            blockdiag_table=blockdiag_table,
+            network_table=network_table,
+        )
     else:
         raise ValueError(f"Unknown mode: {mode!r}. Use 'direct' or 'agent'.")

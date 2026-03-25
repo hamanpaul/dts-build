@@ -240,7 +240,7 @@ class TestHardwareSchemaHelpers:
             dts_hints=[
                 DtsHint(target="&uart0", property="status", value="okay",
                         reason="traced", provenance=_prov()),
-                DtsHint(target="ethphytop", property="lane-swap",
+                DtsHint(target="&mdio_bus/xphy1", property="enet-phy-lane-swap",
                         value="true", reason="swap", provenance=_prov()),
                 DtsHint(target="&uart0", reason="pinctrl", provenance=_prov()),
             ],
@@ -251,7 +251,7 @@ class TestHardwareSchemaHelpers:
         assert schema.has_lane_swap("GPHY1") is True
         assert schema.has_lane_swap("SPI") is False
         assert len(schema.get_dts_hints_for("&uart0")) == 2
-        assert len(schema.get_dts_hints_for("ethphytop")) == 1
+        assert len(schema.get_dts_hints_for("&mdio_bus/xphy1")) == 1
 
 
 # ---------------------------------------------------------------------------

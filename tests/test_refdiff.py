@@ -98,7 +98,7 @@ def test_build_refdiff_report_detects_missing_nodes_properties_and_values(tmp_pa
     assert any(c.compiler_surface == "_render_hsspi" for c in by_type["missing_node"])
 
 
-def test_build_refdiff_report_marks_unsupported_surfaces_without_renderer(tmp_path):
+def test_build_refdiff_report_maps_cpufreq_to_compiler_surface(tmp_path):
     generated = _write(tmp_path / "generated.dts", "/dts-v1/;\n/ { };\n")
     reference = _write(
         tmp_path / "reference.dts",
@@ -107,6 +107,33 @@ def test_build_refdiff_report_marks_unsupported_surfaces_without_renderer(tmp_pa
 / { };
 
 &cpufreq {
+    op-mode = "dvfs";
+};
+""",
+    )
+
+    report = build_refdiff_report(
+        project="TEST",
+        generated_dts_path=generated,
+        reference_dts_path=reference,
+    )
+
+    missing = [c for c in report.candidates if c.candidate_type == "missing_node"]
+    assert len(missing) == 1
+    assert missing[0].target == "/&cpufreq"
+    assert missing[0].route_hint == "renderer"
+    assert missing[0].compiler_surface == "_render_cpufreq"
+
+
+def test_build_refdiff_report_maps_xport_to_compiler_surface(tmp_path):
+    generated = _write(tmp_path / "generated.dts", "/dts-v1/;\n/ { };\n")
+    reference = _write(
+        tmp_path / "reference.dts",
+        """\
+/dts-v1/;
+/ { };
+
+&xport {
     status = "okay";
 };
 """,
@@ -118,11 +145,95 @@ def test_build_refdiff_report_marks_unsupported_surfaces_without_renderer(tmp_pa
         reference_dts_path=reference,
     )
 
-    unsupported = [c for c in report.candidates if c.candidate_type == "unsupported_surface"]
-    assert len(unsupported) == 1
-    assert unsupported[0].target == "/&cpufreq"
-    assert unsupported[0].route_hint == "capability"
-    assert unsupported[0].compiler_surface is None
+    missing = [c for c in report.candidates if c.candidate_type == "missing_node"]
+    assert len(missing) == 1
+    assert missing[0].target == "/&xport"
+    assert missing[0].route_hint == "renderer"
+    assert missing[0].compiler_surface == "_render_xport"
+
+
+def test_build_refdiff_report_maps_mdio_to_compiler_surface(tmp_path):
+    generated = _write(tmp_path / "generated.dts", "/dts-v1/;\n/ { };\n")
+    reference = _write(
+        tmp_path / "reference.dts",
+        """\
+/dts-v1/;
+/ { };
+
+&mdio {
+    status = "okay";
+};
+""",
+    )
+
+    report = build_refdiff_report(
+        project="TEST",
+        generated_dts_path=generated,
+        reference_dts_path=reference,
+    )
+
+    missing = [c for c in report.candidates if c.candidate_type == "missing_node"]
+    assert len(missing) == 1
+    assert missing[0].target == "/&mdio"
+    assert missing[0].route_hint == "renderer"
+    assert missing[0].compiler_surface == "_render_mdio"
+
+
+def test_build_refdiff_report_maps_mdio_bus_to_compiler_surface(tmp_path):
+    generated = _write(tmp_path / "generated.dts", "/dts-v1/;\n/ { };\n")
+    reference = _write(
+        tmp_path / "reference.dts",
+        """\
+/dts-v1/;
+/ { };
+
+&mdio_bus {
+    xphy1 {
+        enet-phy-lane-swap;
+        status = "okay";
+    };
+};
+""",
+    )
+
+    report = build_refdiff_report(
+        project="TEST",
+        generated_dts_path=generated,
+        reference_dts_path=reference,
+    )
+
+    missing = [c for c in report.candidates if c.candidate_type == "missing_node"]
+    assert any(c.target == "/&mdio_bus" for c in missing)
+    assert any(c.compiler_surface == "_render_mdio_bus" for c in missing)
+
+
+def test_build_refdiff_report_maps_switch0_to_compiler_surface(tmp_path):
+    generated = _write(tmp_path / "generated.dts", "/dts-v1/;\n/ { };\n")
+    reference = _write(
+        tmp_path / "reference.dts",
+        """\
+/dts-v1/;
+/ { };
+
+&switch0 {
+    ports {
+        port_xgphy0 {
+            status = "okay";
+        };
+    };
+};
+""",
+    )
+
+    report = build_refdiff_report(
+        project="TEST",
+        generated_dts_path=generated,
+        reference_dts_path=reference,
+    )
+
+    missing = [c for c in report.candidates if c.candidate_type == "missing_node"]
+    assert any(c.target == "/&switch0" for c in missing)
+    assert any(c.compiler_surface == "_render_switch0" for c in missing)
 
 
 def test_build_refdiff_report_maps_ext_pwr_ctrl_to_power_subsystem(tmp_path):
@@ -280,3 +391,28 @@ def test_build_refdiff_report_maps_phy_wan_serdes_to_serdes_subsystem(tmp_path):
     missing = [c for c in report.candidates if c.target == "/&phy_wan_serdes"]
     assert len(missing) == 1
     assert missing[0].subsystem == "serdes"
+
+
+def test_build_refdiff_report_maps_wan_sfp_to_dedicated_surface(tmp_path):
+    generated = _write(tmp_path / "generated.dts", "/dts-v1/;\n/ { };\n")
+    reference = _write(
+        tmp_path / "reference.dts",
+        """\
+/dts-v1/;
+/ {
+    wan_sfp: wan_sfp {
+        compatible = "brcm,sfp";
+    };
+};
+""",
+    )
+
+    report = build_refdiff_report(
+        project="TEST",
+        generated_dts_path=generated,
+        reference_dts_path=reference,
+    )
+
+    missing = [c for c in report.candidates if c.target == "/wan_sfp"]
+    assert len(missing) == 1
+    assert missing[0].compiler_surface == "_render_wan_sfp"

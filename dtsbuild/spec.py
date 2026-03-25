@@ -70,6 +70,11 @@ def _extract_manual_spec(folder: Path, manifest: Manifest) -> dict[str, Any]:
                     "source": row.get("source", ""),
                     "phy_handle": row.get("phy_handle", ""),
                     "phy_mode": row.get("phy_mode", ""),
+                    "phy_group": row.get("phy_group", ""),
+                    "switch_port": row.get("switch_port", ""),
+                    "port_group": row.get("port_group", ""),
+                    "lane_count": row.get("lane_count", ""),
+                    "lane_swap_status": row.get("lane_swap_status", ""),
                     "notes": row.get("notes", ""),
                 }
                 for row in network_rows

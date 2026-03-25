@@ -28,6 +28,7 @@ from .issue_register import build_and_write_issue_register
 from .validation import validate_dts_against_schema
 from dtsbuild.schema_io import load_schema
 from dtsbuild.session import create_session, save_session, SessionState
+from dtsbuild.manifest import load_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,26 @@ def _log_schema_summary(schema_path: Path, phase: str) -> dict[str, Any]:
         cr["total"], cr["pending"],
     )
     return summary
+
+
+def _resolve_reference_dts(project_dir: Path) -> Path | None:
+    """Resolve the public reference DTS from manifest first, then legacy folder."""
+    try:
+        manifest = load_manifest(project_dir)
+    except Exception:
+        manifest = None
+
+    if manifest is not None:
+        ref_entry = manifest.artifacts.get("public_ref_dts")
+        if isinstance(ref_entry, str) and ref_entry.strip():
+            ref_path = (project_dir / ref_entry).resolve()
+            if ref_path.exists():
+                return ref_path
+
+    ref_dts_dir = project_dir / "public_ref_dts"
+    if ref_dts_dir.exists():
+        return next(ref_dts_dir.glob("*.dts"), None)
+    return None
 
 
 # ── Main async pipeline ─────────────────────────────────────────────
@@ -231,13 +252,15 @@ async def run_pipeline(
             logger.info("[4/5] Compiling DTS … (schema changed after resolve)")
         else:
             logger.info("[4/5] Compiling DTS …")
-        ref_dts_dir = project_dir / "public_ref_dts"
-        ref_dts_file = (
-            next(ref_dts_dir.glob("*.dts"), None)
-            if ref_dts_dir.exists() else None
-        )
+        ref_dts_file = _resolve_reference_dts(project_dir)
         try:
-            dts_path = await run_compiler(schema_path, dts_path, ref_dts_file)
+            dts_path = await run_compiler(
+                schema_path,
+                dts_path,
+                ref_dts_file,
+                interactive=interactive,
+                input_handler=input_handler,
+            )
         except Exception as exc:
             session.mark_error(str(exc))
             save_session(session)

@@ -28,6 +28,17 @@ class PowerRule(SubsystemRule):
             "signal with role containing POWER or PS_EN or PWR_CTRL",
         ]
 
+    @staticmethod
+    def _has_cpufreq_hint(hints: list[DtsHint]) -> bool:
+        return any(
+            hint.target in {"cpufreq", "&cpufreq"}
+            or (
+                hint.target in {"cpufreq", "&cpufreq", "chip_features"}
+                and (hint.property or "").lower() in {"op-mode", "cpufreq"}
+            )
+            for hint in hints
+        )
+
     def match(self, signals: list[Signal], devices: list[Device],
               hints: list[DtsHint]) -> bool:
         pwr_sigs = (
@@ -35,7 +46,7 @@ class PowerRule(SubsystemRule):
             + self._signals_by_role(signals, "PS_EN")
             + self._signals_by_role(signals, "PWR_CTRL")
         )
-        return bool(pwr_sigs)
+        return bool(pwr_sigs or self._has_cpufreq_hint(hints))
 
     def apply(self, signals: list[Signal], devices: list[Device],
               hints: list[DtsHint]) -> RuleMatch | None:
@@ -45,7 +56,16 @@ class PowerRule(SubsystemRule):
             + self._signals_by_role(signals, "PWR_CTRL")
         )
         if not pwr_sigs:
-            return None
+            if not self._has_cpufreq_hint(hints):
+                return None
+            return RuleMatch(
+                subsystem="power",
+                node_name="&cpufreq",
+                properties={"op-mode": '"dvfs"'},
+                source=_SOURCE,
+                confidence=1.0,
+                notes=["cpufreq policy approved via public-reference-backed hint"],
+            )
 
         properties: dict = {}
         notes: list[str] = []

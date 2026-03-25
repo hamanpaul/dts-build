@@ -3,8 +3,12 @@
 Pattern source: BCM68575 BDK public reference (968575REF1.dts)
   - ``buttons`` node uses ``compatible = "brcm,buttons"``
   - Children: ``reset_button``, ``ses_button``
-  - Each child has ext_irq-gpio, interrupt-parent, interrupts,
-    and press/hold/release sub-nodes.
+  - Each child has ext_irq-gpio, interrupt-parent, interrupts.
+
+Evidence boundary:
+  - Button presence and GPIO wiring come from traced signals.
+  - Once a specific button is proven to exist, its software behavior subtree
+    may inherit the public-reference template for that button.
 """
 from __future__ import annotations
 
@@ -12,6 +16,41 @@ from dtsbuild.schema import Signal, Device, DtsHint
 from .base import SubsystemRule, RuleMatch
 
 _SOURCE = "BCM68575 BDK public reference (968575REF1.dts buttons node)"
+_RESET_BUTTON_CHILDREN = [
+    {
+        "node_name": "press",
+        "properties": {
+            "print": '"Button Press -- Hold for 5s to do restore to default"',
+        },
+    },
+    {
+        "node_name": "hold",
+        "properties": {
+            "rst_to_dflt": "<5>",
+        },
+    },
+    {
+        "node_name": "release",
+        "properties": {
+            "reset": "<0>",
+        },
+    },
+]
+_SES_BUTTON_CHILDREN = [
+    {
+        "node_name": "press",
+        "properties": {
+            "print": '"Session Button pressed"',
+        },
+    },
+    {
+        "node_name": "release",
+        "properties": {
+            "ses_short_period": "<0>",
+            "ses_long_period": "<3>",
+        },
+    },
+]
 
 
 class ButtonRule(SubsystemRule):
@@ -46,14 +85,13 @@ class ButtonRule(SubsystemRule):
         ses_sigs = self._signals_by_role(signals, "SES_BUTTON")
 
         if not reset_sigs and not ses_sigs:
-            # Fallback: generic BUTTON role
             generic = self._signals_by_role(signals, "BUTTON")
             if not generic:
                 return None
             reset_sigs = [s for s in generic if "reset" in s.name.lower()]
             ses_sigs = [s for s in generic if "ses" in s.name.lower() or "wps" in s.name.lower()]
             if not reset_sigs and not ses_sigs:
-                reset_sigs = generic  # treat unknown buttons as reset
+                reset_sigs = generic
 
         children: list[dict] = []
         notes: list[str] = []
@@ -71,22 +109,7 @@ class ButtonRule(SubsystemRule):
                     "interrupt-parent": "<&gpioc>",
                     "interrupts": f"<{gpio} IRQ_TYPE_EDGE_FALLING>",
                 },
-                "children": [
-                    {
-                        "node_name": "press",
-                        "properties": {
-                            "print": '"Button Press -- Hold for 5s to do restore to default"',
-                        },
-                    },
-                    {
-                        "node_name": "hold",
-                        "properties": {"rst_to_dflt": "<5>"},
-                    },
-                    {
-                        "node_name": "release",
-                        "properties": {"reset": "<0>"},
-                    },
-                ],
+                "children": [dict(child) for child in _RESET_BUTTON_CHILDREN],
             })
 
         for sig in ses_sigs:
@@ -102,21 +125,7 @@ class ButtonRule(SubsystemRule):
                     "interrupt-parent": "<&gpioc>",
                     "interrupts": f"<{gpio} IRQ_TYPE_EDGE_FALLING>",
                 },
-                "children": [
-                    {
-                        "node_name": "press",
-                        "properties": {
-                            "print": '"Session Button pressed"',
-                        },
-                    },
-                    {
-                        "node_name": "release",
-                        "properties": {
-                            "ses_short_period": "<0>",
-                            "ses_long_period": "<3>",
-                        },
-                    },
-                ],
+                "children": [dict(child) for child in _SES_BUTTON_CHILDREN],
             })
 
         if not children:

@@ -3,8 +3,8 @@
 Pattern source: BCM68575 BDK public reference (968575REF1.dts &led_ctrl)
   - ``&led_ctrl`` node with pinctrl for serial LED data/clk/mask pins
   - ``serial-shifters-installed = <N>`` for 74HC595 shift registers
-  - Child LED nodes: ``ledN: serial-xxx { active_low; crossbar-output = <M>; }``
-  - Software LEDs: ``sw_serial_led_XX`` with label property
+  - Child LED nodes require explicit controller/datasheet/circuit-derived mapping
+    and are not guessed from signal ordering alone.
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ class LedRule(SubsystemRule):
         return [
             "signal with role containing LED or SER_LED",
             "device with 74HC595 for serial-shifters-installed count",
+            "explicit LED mapping evidence for child nodes (if any)",
         ]
 
     def match(self, signals: list[Signal], devices: list[Device],
@@ -72,22 +73,10 @@ class LedRule(SubsystemRule):
             notes.append(f"{num} serial shift register(s) detected")
 
         children: list[dict] = []
-        for i, sig in enumerate(led_sigs):
-            led_name = sig.name.lower().replace(" ", "_")
-            child: dict = {
-                "node_name": f"led{i}: serial-{led_name}",
-                "properties": {
-                    "active_low": None,  # boolean property
-                    "crossbar-output": f"<{i}>",
-                    "status": '"okay"',
-                },
-            }
-            # If signal name hints at a label (e.g. WAN, PON, ALARM)
-            for keyword in ("WAN", "PON", "ALARM", "WPS", "VOIP", "USB", "POWER"):
-                if keyword in sig.name.upper():
-                    child["properties"]["label"] = f'"{keyword}"'
-                    break
-            children.append(child)
+        if led_sigs:
+            notes.append(
+                "Child LED nodes require explicit crossbar/trigger mapping and are not guessed from signal order."
+            )
 
         return RuleMatch(
             subsystem="led",

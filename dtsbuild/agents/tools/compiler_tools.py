@@ -361,9 +361,59 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             ("xphy2-enabled", None),
             ("xphy3-enabled", None),
             ("xphy4-enabled", None),
-            ("enet-phy-lane-swap", "<0xXX>"),
             ("wakeup-trigger-pin-gpio", "<&gpioc XX GPIO_ACTIVE_LOW>"),
         ],
+    },
+    "mdio": {
+        "node_name": "&mdio",
+        "is_reference": True,
+        "required_properties": [("status", '"okay"')],
+        "optional_properties": [],
+    },
+    "mdio_bus": {
+        "node_name": "&mdio_bus",
+        "is_reference": True,
+        "required_properties": [],
+        "optional_properties": [],
+        "children_template": {
+            "xphy*": {
+                "required": ["status"],
+                "optional": ["enet-phy-lane-swap"],
+            },
+            "serdes*": {
+                "required": ["status"],
+                "optional": [
+                    "pinctrl-names",
+                    "pinctrl-0",
+                    "rx-power",
+                    "tx-power",
+                    "tx-disable",
+                    "trx",
+                ],
+            },
+        },
+    },
+    "xport": {
+        "node_name": "&xport",
+        "is_reference": True,
+        "required_properties": [("status", '"okay"')],
+        "optional_properties": [],
+    },
+    "switch0": {
+        "node_name": "&switch0",
+        "is_reference": True,
+        "required_properties": [],
+        "optional_properties": [],
+        "children_template": {
+            "ports": {
+                "required": [],
+                "optional": [],
+            },
+            "port_*": {
+                "required": ["status"],
+                "optional": ["network-leds"],
+            },
+        },
     },
     "pcie": {
         "node_name": "&pcie",
@@ -430,7 +480,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
     "cpufreq": {
         "node_name": "&cpufreq",
         "is_reference": True,
-        "required_properties": [("status", '"okay"')],
+        "required_properties": [("op-mode", '"dvfs"')],
         "optional_properties": [],
     },
 }
@@ -438,8 +488,8 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
 
 @define_tool(
     description="Return a DTS node template for a common subsystem "
-                "(uart, i2c, led_ctrl, buttons, ethphytop, pcie, usb, serdes, "
-                "wan_serdes, ext_pwr_ctrl, hsspi, wdt, cpufreq)."
+                "(uart, i2c, led_ctrl, buttons, ethphytop, mdio, mdio_bus, xport, switch0, pcie, "
+                "usb, serdes, wan_serdes, ext_pwr_ctrl, hsspi, wdt, cpufreq)."
 )
 def build_node_template(subsystem: str) -> dict[str, Any]:
     """Return a template dict for the requested subsystem.

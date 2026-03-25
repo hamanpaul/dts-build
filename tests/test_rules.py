@@ -105,15 +105,12 @@ class TestButtonRule:
         rst = result.children[0]
         assert rst["node_name"] == "reset_button"
         assert "2" in rst["properties"]["ext_irq-gpio"]
-        # Reset has press, hold, release
-        assert len(rst["children"]) == 3
-        assert rst["children"][0]["node_name"] == "press"
-        assert rst["children"][1]["node_name"] == "hold"
-        assert rst["children"][2]["node_name"] == "release"
+        assert [child["node_name"] for child in rst["children"]] == ["press", "hold", "release"]
         # Second child is ses_button
         ses = result.children[1]
         assert ses["node_name"] == "ses_button"
         assert "1" in ses["properties"]["ext_irq-gpio"]
+        assert [child["node_name"] for child in ses["children"]] == ["press", "release"]
         # Source attribution
         assert "BCM68575" in result.source
 
@@ -162,9 +159,8 @@ class TestLedRule:
         assert result is not None
         assert result.node_name == "&led_ctrl"
         assert result.properties["serial-shifters-installed"] == "<3>"
-        assert len(result.children) == 1
-        # WAN label detected
-        assert result.children[0]["properties"].get("label") == '"WAN"'
+        assert result.children == []
+        assert any("Child LED nodes require explicit crossbar/trigger mapping" in note for note in result.notes)
 
     def test_led_control_only_keeps_parent_without_guessing_children(self):
         rule = LedRule()
@@ -196,6 +192,7 @@ class TestI2cRule:
         result = rule.apply([], devs, [])
         assert result is not None
         assert result.node_name == "&i2c0"
+        assert result.properties["pinctrl-0"] == "<&bsc_m0_scl_pin_28 &bsc_m0_sda_pin_29>"
         assert result.properties["status"] == '"okay"'
         assert len(result.children) == 1
         child = result.children[0]
@@ -205,6 +202,14 @@ class TestI2cRule:
         assert child["properties"]["#gpio-cells"] == "<2>"
         assert child["properties"].get("gpio-controller") is None  # boolean
         assert "gpio-controller" in child["properties"]
+
+    def test_generates_i2c1_without_i2c0_pinctrl(self):
+        rule = I2cRule()
+        devs = [_dev("U9", "PCA9555", compatible="nxp,pca9555", bus="i2c1", address="0x20")]
+        result = rule.apply([], devs, [])
+        assert result is not None
+        assert result.node_name == "&i2c1"
+        assert "pinctrl-0" not in result.properties
 
     def test_no_match_without_i2c(self):
         rule = I2cRule()
@@ -229,7 +234,7 @@ class TestEthernetRule:
         result = rule.apply(sigs, [], [])
         assert result is not None
         assert result.node_name == "&ethphytop"
-        assert "enet-phy-lane-swap" in result.properties
+        assert "enet-phy-lane-swap" not in result.properties
         assert any("Lane swap" in n for n in result.notes)
 
     def test_no_swap(self):
@@ -270,10 +275,16 @@ class TestPcieRule:
         assert result is not None
         assert result.node_name == "&pcie0"
         assert result.properties["status"] == '"okay"'
-        assert len(result.children) == 1
-        # WiFi regulator with ACTIVE_LOW (DIS in name)
-        wifi_reg = result.children[0]
-        assert "GPIO_ACTIVE_LOW" in wifi_reg["properties"]["gpio"]
+        assert result.children == []
+        assert any("compiler-level proof" in note for note in result.notes)
+
+    def test_rejects_grouped_wifi_controls_without_full_instance_evidence(self):
+        rule = PcieRule()
+        sigs = [
+            _sig("PCIE02_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_51"),
+            _sig("PCIE13_WiFi_PWR_DIS", "PCIE_WIFI", "GPIO_11"),
+        ]
+        assert rule.apply(sigs, [], []) is None
 
 
 # ── Power tests ──────────────────────────────────────────────────────
@@ -300,6 +311,14 @@ class TestPowerRule:
         assert result is not None
         assert "phy-pwr-ctrl-gpios" in result.properties
         assert "89" in result.properties["phy-pwr-ctrl-gpios"]
+
+    def test_generates_cpufreq_from_hint(self):
+        rule = PowerRule()
+        hints = [_hint("&cpufreq", "op-mode", '"dvfs"')]
+        result = rule.apply([], [], hints)
+        assert result is not None
+        assert result.node_name == "&cpufreq"
+        assert result.properties["op-mode"] == '"dvfs"'
 
 
 # ── USB tests ────────────────────────────────────────────────────────

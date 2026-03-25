@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,7 +63,14 @@ def bootstrap_tables(folder: Path, *, force: bool = False) -> BootstrapTablesRes
 
     gpio_rows, gpio_sources = _bootstrap_gpio_rows(manifest, source_spreadsheets)
     ddr_rows, ddr_sources = _bootstrap_ddr_rows(manifest, public_reference, source_spreadsheets, source_pdfs, pdf_indexes)
-    network_rows, network_sources = _bootstrap_network_rows(manifest, source_spreadsheets, source_pdfs, pdf_indexes)
+    public_ref_path = _resolve_public_reference_path(folder, manifest)
+    network_rows, network_sources = _bootstrap_network_rows(
+        manifest,
+        source_spreadsheets,
+        source_pdfs,
+        pdf_indexes,
+        public_ref_path=public_ref_path,
+    )
     blockdiag_rows, blockdiag_sources = _bootstrap_blockdiag_rows(
         manifest,
         source_spreadsheets,
@@ -93,7 +101,20 @@ def bootstrap_tables(folder: Path, *, force: bool = False) -> BootstrapTablesRes
             gpio_rows,
         ),
         "network_table": (
-            ["name", "present", "role", "source", "phy_handle", "phy_mode", "notes"],
+            [
+                "name",
+                "present",
+                "role",
+                "source",
+                "phy_handle",
+                "phy_mode",
+                "phy_group",
+                "switch_port",
+                "port_group",
+                "lane_count",
+                "lane_swap_status",
+                "notes",
+            ],
             network_rows,
         ),
     }
@@ -286,9 +307,13 @@ def _bootstrap_network_rows(
     spreadsheets: list[Path],
     pdfs: list[Path],
     pdf_indexes: list[PdfIndex],
+    *,
+    public_ref_path: Path | None = None,
 ) -> tuple[list[dict[str, str]], list[str]]:
     rows: list[dict[str, str]] = []
     source_notes: list[str] = []
+    switch_port_inventory, inventory_notes = _extract_datasheet_switch_port_inventory(pdfs, public_ref_path)
+    source_notes.extend(inventory_notes)
 
     existing_source = _select_source_table(manifest.artifacts.get("network_table"), spreadsheets, keywords=("network", "port", "wan", "lan"))
     if existing_source:
@@ -300,6 +325,11 @@ def _bootstrap_network_rows(
                 "source": row.get("source", ""),
                 "phy_handle": row.get("phy_handle", ""),
                 "phy_mode": row.get("phy_mode", ""),
+                "phy_group": row.get("phy_group", ""),
+                "switch_port": row.get("switch_port", ""),
+                "port_group": row.get("port_group", ""),
+                "lane_count": row.get("lane_count", ""),
+                "lane_swap_status": row.get("lane_swap_status", ""),
                 "notes": row.get("notes", ""),
             }
             for row in read_table_rows(existing_source)
@@ -310,48 +340,116 @@ def _bootstrap_network_rows(
     for pdf in pdfs:
         index = _find_pdf_index(pdf_indexes, pdf)
         titles_upper = [title.upper() for title, _ in index.titles]
-        if not any(keyword in " ".join(titles_upper) for keyword in ("GPHY", "WAN", "RJ45", "CAGE", "SFP", "XPHY")):
+        if not any(
+            keyword in " ".join(titles_upper)
+            for keyword in ("GPHY", "WAN", "RJ45", "CAGE", "SFP", "XPHY", "BLOCK", "TOPOLOGY", "SWITCH", "PHY")
+        ):
             continue
 
         row_count_before = len(rows)
-        relevant_pages = [
-            page
+        relevant_page_entries = [
+            (title, page)
             for title, page in index.titles
-            if any(keyword in title.upper() for keyword in ("GPHY", "WAN", "RJ45", "CAGE", "SFP", "XPHY"))
+            if any(keyword in title.upper() for keyword in ("GPHY", "WAN", "RJ45", "CAGE", "SFP", "XPHY", "BLOCK", "TOPOLOGY", "SWITCH", "PHY"))
             and "GPIO" not in title.upper()
         ]
-        text = "\n".join(extract_pdf_text(pdf, first_page=page, last_page=page) for page in relevant_pages[:4])
+        lower_pdf_name = pdf.name.lower()
+        if (
+            not any("BLOCK" in title.upper() or "TOPOLOGY" in title.upper() for title, _ in relevant_page_entries)
+            and ("main" in lower_pdf_name or "board" in lower_pdf_name)
+            and all(page != 2 for _, page in relevant_page_entries)
+        ):
+            relevant_page_entries.insert(0, ("BLOCK DIAGRAM", 2))
+        page_texts: list[str] = []
+        ocr_used = False
+        for title, page in relevant_page_entries[:6]:
+            page_text = extract_pdf_text(pdf, first_page=page, last_page=page)
+            if "BLOCK" in title.upper() or "TOPOLOGY" in title.upper():
+                ocr_text = _extract_pdf_text_via_ocr(pdf, first_page=page, last_page=page)
+                if ocr_text:
+                    page_text = f"{page_text}\n{ocr_text}".strip()
+                    ocr_used = True
+            page_texts.append(page_text)
+        text = "\n".join(page_texts)
+        page_ref = f"{pdf.stem}:pages {','.join(str(page) for _, page in relevant_page_entries if page)}"
+        blockdiag_note = _summarize_blockdiag_profile(text)
+        if ocr_used:
+            source_notes.append(f"network_table used block diagram OCR fallback for {pdf.name}")
         seen_lan: set[str] = set()
         for lane in sorted(set(re.findall(r"2\.5GPHY\s*([0-9])", text, flags=re.IGNORECASE))):
             name = f"lan_gphy{lane}"
             if name in seen_lan:
                 continue
+            notes = [
+                "Derived from 2.5GPHY lane labels on schematic pages.",
+                "Exact board-level port mapping still requires explicit topology evidence.",
+            ]
+            if blockdiag_note:
+                notes.append(blockdiag_note)
+            if switch_port_inventory:
+                notes.append(
+                    "CPU datasheet validates XPORT inventory "
+                    + ",".join(sorted(port for port in switch_port_inventory if port.startswith("port_xgphy")))
+                    + "."
+                )
             rows.append(
                 {
                     "name": name,
-                    "present": "true",
+                    "present": "inferred",
                     "role": "LAN",
-                    "source": f"{pdf.stem}:pages {','.join(str(page) for page in relevant_pages if page)}",
+                    "source": page_ref,
                     "phy_handle": f"gphy{lane}",
                     "phy_mode": "internal-2.5gphy",
-                    "notes": "Derived from 2.5GPHY/RJ45 schematic pages.",
+                    "phy_group": "",
+                    "switch_port": "",
+                    "port_group": "",
+                    "lane_count": "1",
+                    "lane_swap_status": "pending_audit",
+                    "notes": " ".join(notes),
                 }
             )
             seen_lan.add(name)
 
         if re.search(r"\b10GPHY\b|\bXPHY10G_", text, flags=re.IGNORECASE):
+            notes = [
+                "Derived from 10G PHY / WAN cage schematic pages.",
+                "Exact switch-port mapping still requires explicit topology evidence.",
+            ]
+            if blockdiag_note:
+                notes.append(blockdiag_note)
+            switch_port = ""
+            port_group = ""
+            if "port_wan@xpon_ae" in switch_port_inventory and re.search(r"SFP\+?\s*CAGE|WAN\s+INTERFACE|PON\s+TRANSCEIVER", text, flags=re.IGNORECASE):
+                switch_port = "port_wan@xpon_ae"
+                port_group = "xpon_ae"
+                notes.append("CPU datasheet-validated XPORT inventory and block diagram WAN/SFP evidence map this row to port_wan@xpon_ae.")
             rows.append(
                 {
                     "name": "wan_10g",
                     "present": "true",
                     "role": "WAN",
-                    "source": f"{pdf.stem}:pages {','.join(str(page) for page in relevant_pages if page)}",
+                    "source": page_ref,
                     "phy_handle": "xphy10g",
                     "phy_mode": "xfi",
-                    "notes": "Derived from 10G PHY / WAN cage schematic pages.",
+                    "phy_group": "",
+                    "switch_port": switch_port,
+                    "port_group": port_group,
+                    "lane_count": "1",
+                    "lane_swap_status": "pending_audit",
+                    "notes": " ".join(notes),
                 }
             )
         elif any("WAN" in title.upper() and "CAGE" in title.upper() for title, _ in index.titles):
+            notes = [
+                "Derived from WAN cage page index.",
+                "Exact switch-port mapping still requires explicit topology evidence.",
+            ]
+            switch_port = ""
+            port_group = ""
+            if "port_wan@xpon_ae" in switch_port_inventory:
+                switch_port = "port_wan@xpon_ae"
+                port_group = "xpon_ae"
+                notes.append("CPU datasheet-validated XPORT inventory confirms the WAN switch-port template.")
             rows.append(
                 {
                     "name": "wan_10g",
@@ -360,7 +458,12 @@ def _bootstrap_network_rows(
                     "source": f"{pdf.stem}:cover index",
                     "phy_handle": "xphy10g",
                     "phy_mode": "xfi",
-                    "notes": "Derived from WAN cage page index.",
+                    "phy_group": "",
+                    "switch_port": switch_port,
+                    "port_group": port_group,
+                    "lane_count": "1",
+                    "lane_swap_status": "pending_audit",
+                    "notes": " ".join(notes),
                 }
             )
 
@@ -564,6 +667,114 @@ def extract_pdf_text(path: Path, *, first_page: int | None = None, last_page: in
         start = (first_page - 1) if first_page else 0
         end = last_page if last_page else len(reader.pages)
         return "\n".join(reader.pages[index].extract_text() or "" for index in range(start, min(end, len(reader.pages))))
+
+
+def _extract_pdf_text_via_ocr(
+    path: Path,
+    *,
+    first_page: int | None = None,
+    last_page: int | None = None,
+) -> str:
+    if first_page is None or last_page is None:
+        return ""
+
+    chunks: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            for page in range(first_page, last_page + 1):
+                image_prefix = temp_path / f"page-{page}"
+                subprocess.run(
+                    [
+                        "pdftoppm",
+                        "-f",
+                        str(page),
+                        "-l",
+                        str(page),
+                        "-r",
+                        "300",
+                        "-png",
+                        "-singlefile",
+                        str(path),
+                        str(image_prefix),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                output_base = temp_path / f"ocr-{page}"
+                subprocess.run(
+                    ["tesseract", str(image_prefix.with_suffix(".png")), str(output_base), "--psm", "11"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                txt_path = output_base.with_suffix(".txt")
+                if txt_path.exists():
+                    chunks.append(txt_path.read_text(encoding="utf-8", errors="ignore"))
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""
+    return "\n".join(chunk for chunk in chunks if chunk)
+
+
+def _resolve_public_reference_path(folder: Path, manifest) -> Path | None:
+    artifact = manifest.artifacts.get("public_ref_dts")
+    if not artifact:
+        return None
+    path = (folder / str(artifact)).resolve()
+    return path if path.exists() else None
+
+
+def _extract_public_switch_ports(public_ref_path: Path | None) -> set[str]:
+    if public_ref_path is None or not public_ref_path.exists():
+        return set()
+    text = public_ref_path.read_text(encoding="utf-8", errors="ignore")
+    return {
+        match.group(1)
+        for match in re.finditer(
+            r"\b(port_xgphy\d+|port_wan@xpon_ae|port_wan@slan_sd|port_slan0@xpon_ae|port_slan1@slan_sd)\b",
+            text,
+        )
+    }
+
+
+def _extract_datasheet_switch_port_inventory(
+    pdfs: list[Path],
+    public_ref_path: Path | None,
+) -> tuple[set[str], list[str]]:
+    switch_ports = _extract_public_switch_ports(public_ref_path)
+    if not switch_ports:
+        return set(), []
+
+    for pdf in pdfs:
+        lower_name = pdf.name.lower()
+        if "68575" not in lower_name and "pr100" not in lower_name:
+            continue
+        text = extract_pdf_text(pdf, first_page=1, last_page=40)
+        if all(
+            token in text
+            for token in (
+                "ETH_XPORT_0",
+                "ETH_XPORT_1",
+                "XPORT_PORTRESET_0",
+                "XPORT_PORTRESET_1",
+                "ETH_GPHY_RGMII_INTRL2",
+            )
+        ):
+            return switch_ports, [f"switch_port inventory validated against CPU datasheet {pdf.name}"]
+    return set(), []
+
+
+def _summarize_blockdiag_profile(text: str) -> str:
+    notes: list[str] = []
+    ge_match = re.search(r"1GE\s+LAN\s*[\*xX]\s*(\d+)", text, flags=re.IGNORECASE)
+    if ge_match:
+        notes.append(f"Block diagram OCR detected 1GE LAN x{ge_match.group(1)}.")
+    if re.search(r"\b5GE\s+PHY\b", text, flags=re.IGNORECASE):
+        notes.append("Block diagram OCR detected a 5GE PHY.")
+    if re.search(r"SFP\+?\s*CAGE\s+FOR\s+PON\s+TRANSCEIVER", text, flags=re.IGNORECASE):
+        notes.append("Block diagram OCR detected an SFP+ cage for PON transceiver.")
+    return " ".join(notes)
 
 
 def _parse_cover_titles(text: str) -> list[tuple[str, int]]:

@@ -21,15 +21,27 @@ _RENDER_SURFACES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^/&wdt(?:/|$)"), "_render_wdt"),
     (re.compile(r"^/&hsspi(?:/|$)"), "_render_hsspi"),
     (re.compile(r"^/&led_ctrl(?:/|$)"), "_render_led_ctrl"),
+    (re.compile(r"^/&xport(?:/|$)"), "_render_xport"),
     (re.compile(r"^/&ethphytop(?:/|$)"), "_render_ethphy"),
+    (re.compile(r"^/&mdio(?:/|$)"), "_render_mdio"),
+    (re.compile(r"^/&mdio_bus(?:/|$)"), "_render_mdio_bus"),
+    (re.compile(r"^/&switch0(?:/|$)"), "_render_switch0"),
     (re.compile(r"^/&i2c\d+(?:/|$)"), "_render_i2c"),
     (re.compile(r"^/&usb_ctrl(?:/|$)"), "_render_usb"),
     (re.compile(r"^/&usb0_xhci(?:/|$)"), "_render_usb"),
     (re.compile(r"^/&pcie\d+(?:/|$)"), "_render_pcie"),
     (re.compile(r"^/&wan_serdes(?:/|$)"), "_render_serdes"),
-    (re.compile(r"^/wan_sfp(?:/|$)"), "_render_serdes"),
+    (re.compile(r"^/wan_sfp(?:/|$)"), "_render_wan_sfp"),
     (re.compile(r"^/&ext_pwr_ctrl(?:/|$)"), "_render_power_ctrl"),
+    (re.compile(r"^/&cpufreq(?:/|$)"), "_render_cpufreq"),
 )
+
+
+def _strip_block_comments_preserving_lines(text: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        return "\n" * match.group(0).count("\n")
+
+    return _COMMENT_BLOCK_RE.sub(_replace, text)
 
 
 @dataclass(slots=True)
@@ -65,7 +77,7 @@ def parse_dts_document(path: Path) -> DtsDocument:
     """Parse a DTS file into a lightweight node/property tree."""
     path = Path(path)
     text = path.read_text(encoding="utf-8", errors="ignore")
-    text = _COMMENT_BLOCK_RE.sub("", text)
+    text = _strip_block_comments_preserving_lines(text)
     total_lines = len(text.splitlines())
     nodes: list[DtsNode] = []
     stack: list[DtsNode] = []
