@@ -5,6 +5,14 @@
 __pycache__/
 *.pyc
 
+# Sensitive/local board inputs
+/dtsin_*/
+!/dtsin_template/
+!/dtsin_template/**
+
+# Sensitive/local generated outputs
+/dtsout_BGW720/
+
 dtsin_BGW720/out/
 *.Zone.Identifier
 *.zone.identifier

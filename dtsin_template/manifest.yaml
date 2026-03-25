@@ -1,0 +1,27 @@
+project: "{{PROJECT}}"
+family: bcm68575
+profile: "{{PROFILE}}"
+refboard: "{{REFBOARD}}"
+model: "{{PROJECT}}"
+output_dts: "{{PROJECT}}.dts"
+output_dir: "dtsout_{{PROJECT}}"
+base_include: inc/68375.dtsi
+compatible: brcm,bcm968375
+
+artifacts:
+  # Fill these with files that actually exist under dtsin_{{PROJECT}}/.
+  blockdiag_table: tables/blockdiag.csv
+  ddr_table: tables/ddr.csv
+  gpio_led_table: tables/gpio_led.csv
+  network_table: tables/network.csv
+
+  # Optional but recommended when available.
+  # public_ref_dts: 968575REF1.dts
+  # schematic_pdfs:
+  #   - board-main.pdf
+  #   - board-daughter.pdf
+
+notes:
+  - Replace placeholders before running inspect-folder or generate-dts.
+  - Remove artifact entries that you do not provide yet.
+  - All artifact paths are relative to this manifest.yaml.
