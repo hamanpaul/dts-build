@@ -58,7 +58,7 @@ class BootstrapTablesTest(unittest.TestCase):
             ws.append(["WAN_LED_G", "0", "", "GPIO_49", "WAN_LED_G", "0", "O", "Low", "WAN LED"])
             workbook.save(folder / "GPIO_R0A.xlsx")
 
-            for name in ("MAINBOARD.pdf", "DAUGHTER.pdf", "K4F6E3S4HM-MGCJ.pdf"):
+            for name in ("MAINBOARD.pdf", "DAUGHTER.pdf", "K4F6E3S4HM-MGCJ.pdf", "68575-PR100.pdf"):
                 (folder / name).write_bytes(b"%PDF-1.4\n")
             (folder / "968575REF1.dts").write_text(
                 """
@@ -83,6 +83,16 @@ class BootstrapTablesTest(unittest.TestCase):
 };
 &i2c0 {
     status = "okay";
+};
+&switch0 {
+    ports {
+        port_xgphy0 { status = "okay"; };
+        port_xgphy1 { status = "okay"; };
+        port_xgphy2 { status = "okay"; };
+        port_xgphy3 { status = "okay"; };
+        port_xgphy4 { status = "okay"; };
+        port_wan@xpon_ae { status = "okay"; };
+    };
 };
                 """.strip()
                 + "\n",
@@ -137,12 +147,35 @@ class BootstrapTablesTest(unittest.TestCase):
                     200FBGA, 10x15
                     Organization per channel x32
                 """,
+                ("68575-PR100.pdf", 1, 40): """
+                    ETH_XPORT_0
+                    ETH_XPORT_1
+                    XPORT_PORTRESET_0_P0
+                    XPORT_PORTRESET_1_P0
+                    ETH_GPHY_RGMII_INTRL2
+                """,
             }
 
             def fake_extract_pdf_text(path: Path, *, first_page: int | None = None, last_page: int | None = None) -> str:
                 return pdf_text_map.get((path.name, first_page, last_page), "")
 
-            with patch("dtsbuild.bootstrap_tables.extract_pdf_text", side_effect=fake_extract_pdf_text):
+            def fake_extract_pdf_text_via_ocr(path: Path, *, first_page: int | None = None, last_page: int | None = None) -> str:
+                if path.name == "MAINBOARD.pdf" and first_page == 2 and last_page == 2:
+                    return """
+                        Block Diagram
+                        1GE PHY
+                        1GE LAN*3
+                        5GE PHY
+                        SFP+ Cage for PON Transceiver
+                        Serdes
+                        BCM68575
+                    """
+                return ""
+
+            with (
+                patch("dtsbuild.bootstrap_tables.extract_pdf_text", side_effect=fake_extract_pdf_text),
+                patch("dtsbuild.bootstrap_tables._extract_pdf_text_via_ocr", side_effect=fake_extract_pdf_text_via_ocr),
+            ):
                 result = bootstrap_tables(folder, force=True)
 
             self.assertTrue((folder / "tables" / "blockdiag.csv").exists())
@@ -164,9 +197,43 @@ class BootstrapTablesTest(unittest.TestCase):
             self.assertTrue(any(row["field"] == "memcfg_macro" and "BP1_DDR_TYPE_LPDDR4" in row["value"] for row in ddr_rows))
             self.assertTrue(any(row["field"] == "memcfg_macro" and "public_ref_dts" in row["notes"] for row in ddr_rows))
 
+            with (folder / "tables" / "network.csv").open("r", encoding="utf-8", newline="") as fh:
+                network_rows = list(csv.DictReader(fh))
+            self.assertTrue(
+                any(
+                    row["name"] == "lan_gphy0"
+                    and row["present"] == "inferred"
+                    and row["phy_group"] == ""
+                    and row["switch_port"] == ""
+                    and row["port_group"] == ""
+                    and row["lane_swap_status"] == "pending_audit"
+                    and "Block diagram OCR detected 1GE LAN x3." in row["notes"]
+                    and "CPU datasheet validates XPORT inventory" in row["notes"]
+                    for row in network_rows
+                )
+            )
+            self.assertTrue(
+                any(
+                    row["name"] == "wan_10g"
+                    and row["phy_handle"] == "xphy10g"
+                    and row["switch_port"] == "port_wan@xpon_ae"
+                    and row["port_group"] == "xpon_ae"
+                    and row["phy_group"] == ""
+                    for row in network_rows
+                )
+            )
+
             spec = extract_board_spec(folder, manifest, backend="manual")
             self.assertEqual(spec["public_reference"]["path"], "968575REF1.dts")
             self.assertIn("wan_serdes", spec["public_reference"]["patterns"])
+            self.assertTrue(
+                any(
+                    row["name"] == "wan_10g"
+                    and row["switch_port"] == "port_wan@xpon_ae"
+                    and row["phy_group"] == ""
+                    for row in spec["network"]["rows"]
+                )
+            )
             report = build_sufficiency_report(folder, manifest, spec)
             self.assertTrue(report["ready_to_generate"])
             self.assertEqual(report["blocking_gaps"], [])

@@ -105,12 +105,12 @@ class TestButtonRule:
         rst = result.children[0]
         assert rst["node_name"] == "reset_button"
         assert "2" in rst["properties"]["ext_irq-gpio"]
-        assert rst["children"] == []
+        assert [child["node_name"] for child in rst["children"]] == ["press", "hold", "release"]
         # Second child is ses_button
         ses = result.children[1]
         assert ses["node_name"] == "ses_button"
         assert "1" in ses["properties"]["ext_irq-gpio"]
-        assert ses["children"] == []
+        assert [child["node_name"] for child in ses["children"]] == ["press", "release"]
         # Source attribution
         assert "BCM68575" in result.source
 
@@ -159,9 +159,8 @@ class TestLedRule:
         assert result is not None
         assert result.node_name == "&led_ctrl"
         assert result.properties["serial-shifters-installed"] == "<3>"
-        assert len(result.children) == 1
-        # WAN label detected
-        assert result.children[0]["properties"].get("label") == '"WAN"'
+        assert result.children == []
+        assert any("Child LED nodes require explicit crossbar/trigger mapping" in note for note in result.notes)
 
     def test_led_control_only_keeps_parent_without_guessing_children(self):
         rule = LedRule()
@@ -235,7 +234,7 @@ class TestEthernetRule:
         result = rule.apply(sigs, [], [])
         assert result is not None
         assert result.node_name == "&ethphytop"
-        assert "enet-phy-lane-swap" in result.properties
+        assert "enet-phy-lane-swap" not in result.properties
         assert any("Lane swap" in n for n in result.notes)
 
     def test_no_swap(self):
@@ -276,10 +275,8 @@ class TestPcieRule:
         assert result is not None
         assert result.node_name == "&pcie0"
         assert result.properties["status"] == '"okay"'
-        assert len(result.children) == 1
-        # WiFi regulator with ACTIVE_LOW (DIS in name)
-        wifi_reg = result.children[0]
-        assert "GPIO_ACTIVE_LOW" in wifi_reg["properties"]["gpio"]
+        assert result.children == []
+        assert any("compiler-level proof" in note for note in result.notes)
 
     def test_rejects_grouped_wifi_controls_without_full_instance_evidence(self):
         rule = PcieRule()
@@ -314,6 +311,14 @@ class TestPowerRule:
         assert result is not None
         assert "phy-pwr-ctrl-gpios" in result.properties
         assert "89" in result.properties["phy-pwr-ctrl-gpios"]
+
+    def test_generates_cpufreq_from_hint(self):
+        rule = PowerRule()
+        hints = [_hint("&cpufreq", "op-mode", '"dvfs"')]
+        result = rule.apply([], [], hints)
+        assert result is not None
+        assert result.node_name == "&cpufreq"
+        assert result.properties["op-mode"] == '"dvfs"'
 
 
 # ── USB tests ────────────────────────────────────────────────────────

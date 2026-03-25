@@ -128,7 +128,9 @@ class DtsHint(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    target: str = Field(description='DTS node target (e.g. "&uart0", "ethphytop")')
+    target: str = Field(
+        description='DTS node target (e.g. "&uart0", "ethphytop", "&mdio_bus/xphy1")'
+    )
     property: Optional[str] = Field(
         default=None,
         description='Specific property (e.g. "enet-phy-lane-swap")',

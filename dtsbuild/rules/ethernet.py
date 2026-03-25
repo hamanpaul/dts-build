@@ -2,7 +2,6 @@
 
 Pattern source: BCM68575 BDK public reference (968575REF1.dts &ethphytop)
   - ``&ethphytop { xphy0-enabled; ... status = "okay"; }``
-  - ``enet-phy-lane-swap;`` boolean property when lane swap is detected
   - ``wakeup-trigger-pin-gpio`` for Wake-on-LAN
 """
 from __future__ import annotations
@@ -23,13 +22,12 @@ class EthernetRule(SubsystemRule):
 
     @property
     def description(self) -> str:
-        return "Ethernet PHY topology (lane swap, Wake-on-LAN)"
+        return "Ethernet PHY topology (xphy enable, Wake-on-LAN)"
 
     @property
     def required_evidence(self) -> list[str]:
         return [
             "signal with role containing ETHERNET_PHY",
-            "swap_detected field on signal (for lane swap)",
         ]
 
     def match(self, signals: list[Signal], devices: list[Device],
@@ -63,9 +61,6 @@ class EthernetRule(SubsystemRule):
                 detail = sig.swap_detail or sig.name
                 notes.append(f"Lane swap detected: {detail}")
                 break
-
-        if swap_detected:
-            properties["enet-phy-lane-swap"] = None  # boolean
 
         # DTS hints (e.g. from traced evidence)
         ethphy_hints = [h for h in hints if h.target in ("ethphytop", "&ethphytop")]

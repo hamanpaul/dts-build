@@ -2,9 +2,8 @@
 
 Pattern source: BCM68575 BDK public reference (968575REF1.dts &pcie0..2)
   - PCIe slots enabled with ``status = "okay"``
-  - WiFi power regulators via GPIO:
-    PCIE0_REG_GPIO, PCIE1_REG_GPIO etc.
-  - Polarity: GPIO_ACTIVE_LOW for power-disable signals
+  - Per-slot regulator GPIO/polarity/share relationships are compiler-level
+    decisions and are not guessed by this rule library.
 """
 from __future__ import annotations
 
@@ -53,30 +52,17 @@ class PcieRule(SubsystemRule):
             return None
 
         notes: list[str] = []
-        children: list[dict] = []
-
-        # WiFi regulator GPIOs
-        for sig in wifi_sigs:
-            gpio = self._extract_gpio_num(sig.soc_pin)
-            if gpio is None:
-                notes.append(f"Could not extract GPIO from WiFi signal {sig.name}")
-                continue
-            polarity = "GPIO_ACTIVE_LOW" if "DIS" in sig.name.upper() else "GPIO_ACTIVE_HIGH"
-            children.append({
-                "node_name": f"wifi_reg_{sig.name.lower()}",
-                "properties": {
-                    "gpio": f"<&gpioc {gpio} {polarity}>",
-                },
-            })
-
         primary = sorted(instances)[0]
         notes.append(f"PCIe instances: {sorted(instances)}")
+        if wifi_sigs:
+            notes.append(
+                "Per-slot regulator GPIO/polarity/share mapping requires separate compiler-level proof."
+            )
 
         return RuleMatch(
             subsystem="pcie",
             node_name=f"&pcie{primary}",
             properties={"status": '"okay"'},
-            children=children,
             source=_SOURCE,
             confidence=1.0,
             notes=notes,

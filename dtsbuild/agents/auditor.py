@@ -21,6 +21,7 @@ from dtsbuild.pcie_utils import (
 )
 from dtsbuild.schema import HardwareSchema, Provenance
 from dtsbuild.schema_io import save_schema, load_schema
+from dtsbuild.tables import read_table_rows
 from .tools.tracing import (
     trace_net, trace_cross_pdf,
     detect_lane_swap, lookup_refdes,
@@ -281,6 +282,119 @@ def _read_blockdiag_table(blockdiag_table: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(fh))
 
 
+def _read_optional_table(path: Path | None) -> list[dict[str, str]]:
+    if path is None or not path.exists():
+        return []
+    return read_table_rows(path)
+
+
+def _has_present_truth(row: dict[str, str]) -> bool:
+    return (row.get("present") or "").strip().lower() in {"true", "yes", "1", "y"}
+
+
+def _proven_network_gphy_prefixes(network_rows: list[dict[str, str]]) -> set[str]:
+    prefixes: set[str] = set()
+    for row in network_rows:
+        if not _has_present_truth(row):
+            continue
+        phy_handle = (row.get("phy_handle") or "").strip().lower()
+        match = re.fullmatch(r"gphy(\d+)", phy_handle)
+        if match:
+            prefixes.add(f"GPHY{match.group(1)}")
+    return prefixes
+
+
+def _lane_swap_candidate_gphy_prefixes(network_rows: list[dict[str, str]]) -> set[str]:
+    prefixes: set[str] = set()
+    for row in network_rows:
+        present = (row.get("present") or "").strip().lower()
+        if present not in {"true", "yes", "1", "y", "inferred"}:
+            continue
+        phy_handle = (row.get("phy_handle") or "").strip().lower()
+        match = re.fullmatch(r"gphy(\d+)", phy_handle)
+        if match:
+            prefixes.add(f"GPHY{match.group(1)}")
+    return prefixes
+
+
+def _network_row_provenance(row: dict[str, str]) -> dict[str, Any]:
+    source = (row.get("source") or "").strip()
+    pdf_id = source.split(":", 1)[0] if source else "network_table"
+    page_match = re.search(r"pages?\s+([0-9,\s]+)", source, re.IGNORECASE)
+    if page_match:
+        pages = [int(match) for match in re.findall(r"\d+", page_match.group(1))] or [0]
+    else:
+        pages = [0]
+    refs = [
+        value
+        for value in (
+            row.get("name", "").strip(),
+            row.get("phy_handle", "").strip(),
+            row.get("switch_port", "").strip(),
+        )
+        if value
+    ]
+    return {
+        "pdfs": [pdf_id],
+        "pages": pages,
+        "refs": refs,
+        "method": "network_table",
+        "confidence": 0.8,
+    }
+
+
+def _audit_network_topology(network_rows: list[dict[str, str]], schema_path: str) -> None:
+    wrote_xport = False
+
+    for row in network_rows:
+        if not _has_present_truth(row):
+            continue
+
+        name = (row.get("name") or "").strip()
+        role = (row.get("role") or "").strip()
+        phy_handle = (row.get("phy_handle") or "").strip().lower()
+        phy_group = (row.get("phy_group") or "").strip()
+        switch_port = (row.get("switch_port") or "").strip()
+        provenance = _network_row_provenance(row)
+
+        if switch_port:
+            write_dts_hint(
+                schema_path=schema_path,
+                target=f"&switch0/ports/{switch_port}",
+                property="status",
+                value='"okay"',
+                reason=(
+                    f"Stable topology row {name or switch_port}: role={role or 'UNKNOWN'}, "
+                    f"phy_handle={phy_handle or 'UNKNOWN'}, phy_group={phy_group or 'UNKNOWN'}"
+                ),
+                provenance=provenance,
+            )
+
+        gphy_match = re.fullmatch(r"gphy(\d+)", phy_handle)
+        if gphy_match:
+            write_dts_hint(
+                schema_path=schema_path,
+                target="&ethphytop",
+                property=f"xphy{int(gphy_match.group(1))}-enabled",
+                reason=(
+                    f"Stable topology row {name or phy_handle}: switch_port={switch_port or 'UNKNOWN'}, "
+                    f"phy_group={phy_group or 'UNKNOWN'}"
+                ),
+                provenance=provenance,
+            )
+
+        if not wrote_xport:
+            write_dts_hint(
+                schema_path=schema_path,
+                target="&xport",
+                property="status",
+                value='"okay"',
+                reason="Stable network topology confirms Ethernet transport is used on this board.",
+                provenance=provenance,
+            )
+            wrote_xport = True
+
+
 def _write_gpio_table_signal(
     signal_name: str,
     gpio_pin: str,
@@ -407,6 +521,61 @@ def _audit_usb_presence(
     logger.info("Recorded %d USB signals from blockdiag + schematic evidence", len(evidence))
 
 
+def _audit_usb_port_policy(
+    indices: dict[str, Any],
+    schema_path: str,
+) -> None:
+    """Record usb_ctrl port policy when only the USB0 external path is populated."""
+    hit = _find_page_with_tokens(
+        indices,
+        "mainboard",
+        (
+            "USB0_VBUS",
+            "USB0_DP",
+            "USB0_DM",
+            "USB0_SSRXN",
+            "USB1_DP",
+            "USB1_DM",
+            "USB1_ID",
+            "USB1_PWRON",
+        ),
+    )
+    if hit is None:
+        return
+
+    page_num, content = hit
+    haystack = content.upper()
+    if any(token in haystack for token in ("USB1_VBUS", "USB1_SSRXN", "USB1_SSTXN", "USB1_SSTXP")):
+        return
+
+    write_dts_hint(
+        schema_path=schema_path,
+        target="&usb_ctrl",
+        property="port1-disabled",
+        reason=(
+            "Mainboard USB page shows a populated USB0 connector/power path, "
+            "while the USB1 lane has no matching VBUS or superspeed path."
+        ),
+        provenance={
+            "pdfs": ["mainboard"],
+            "pages": [page_num],
+            "refs": [
+                "USB0_VBUS",
+                "USB0_DP",
+                "USB0_DM",
+                "USB0_SSRXN",
+                "USB1_DP",
+                "USB1_DM",
+                "USB1_ID",
+                "USB1_PWRON",
+            ],
+            "method": "page_scan",
+            "confidence": 0.74,
+        },
+    )
+    logger.info("Recorded usb_ctrl port1-disabled hint from mainboard page %d", page_num)
+
+
 def _audit_uart_presence(
     indices: dict[str, Any],
     schema_path: str,
@@ -444,6 +613,50 @@ def _audit_uart_presence(
             },
         )
     logger.info("Recorded uart0 TX/RX from mainboard page %d header context", page_num)
+
+
+def _audit_wan_sfp_i2c_bus(
+    indices: dict[str, Any],
+    schema_path: str,
+) -> None:
+    """Record wan_sfp i2c-bus when SFP cage I2C wiring is explicit in schematic OCR."""
+    hit = _find_page_with_tokens(
+        indices,
+        "mainboard",
+        ("U6", "I2C ADDRESS", "0XA0/A2", "SFP_SCL", "SFP_SDA"),
+    )
+    if hit is None:
+        return
+
+    page_num, content = hit
+    haystack = content.upper()
+    bus_num: str | None = None
+    for pattern in (r"\bSDA[_\s-]?(\d+)\b", r"\bSCL[_\s-]?(\d+)\b"):
+        match = re.search(pattern, haystack)
+        if match:
+            bus_num = match.group(1)
+            break
+    if bus_num is None:
+        return
+
+    write_dts_hint(
+        schema_path=schema_path,
+        target="wan_sfp",
+        property="i2c-bus",
+        value=f"<&i2c{bus_num}>",
+        reason=(
+            "SFP cage U6 exposes EEPROM I2C address 0xA0/A2 and the schematic "
+            f"routes SFP_SCL/SFP_SDA to i2c{bus_num}."
+        ),
+        provenance={
+            "pdfs": ["mainboard"],
+            "pages": [page_num],
+            "refs": ["U6", "SFP_SCL", "SFP_SDA", f"SDA_{bus_num}", "0xA0/A2"],
+            "method": "page_scan",
+            "confidence": 0.78,
+        },
+    )
+    logger.info("Recorded wan_sfp i2c-bus hint from mainboard page %d", page_num)
 
 
 # ── Schema bootstrap ────────────────────────────────────────────────
@@ -785,6 +998,8 @@ def _trace_signal(
 def _audit_gphy_lane_swap(
     indices: dict[str, Any],
     schema_path: str,
+    *,
+    allowed_prefixes: set[str] | None = None,
 ) -> None:
     """Detect lane swaps for all GPHY groups and write hints."""
     tag_index = indices.get("tag_index", {})
@@ -800,6 +1015,12 @@ def _audit_gphy_lane_swap(
     if not gphy_prefixes:
         logger.info("No GPHY signals found in tag index — skipping lane swap detection")
         return
+
+    if allowed_prefixes is not None:
+        gphy_prefixes &= allowed_prefixes
+        if not gphy_prefixes:
+            logger.info("No GPHY lane-swap candidates are available from network rows — skipping lane swap detection")
+            return
 
     for prefix in sorted(gphy_prefixes):
         # Run lane swap detection in each PDF that has these signals
@@ -830,7 +1051,7 @@ def _audit_gphy_lane_swap(
 
                 write_dts_hint(
                     schema_path=schema_path,
-                    target="ethphytop",
+                    target=f"&mdio_bus/xphy{prefix.removeprefix('GPHY')}",
                     property="enet-phy-lane-swap",
                     value=f"{prefix}: {result['swap_detail']}",
                     reason=f"Lane swap detected for {prefix}: {result['swap_detail']}",
@@ -948,6 +1169,7 @@ async def _audit_direct(
     schema_path: Path,
     *,
     blockdiag_table: Path | None = None,
+    network_table: Path | None = None,
 ) -> None:
     """Systematically trace every GPIO signal and write results."""
     sp = str(schema_path)
@@ -1001,13 +1223,18 @@ async def _audit_direct(
                 },
             )
 
+    network_rows = _read_optional_table(network_table)
+
     # 2. Supplemental non-GPIO subsystem evidence
     _audit_usb_presence(indices, blockdiag_table, sp)
+    _audit_usb_port_policy(indices, sp)
     _audit_uart_presence(indices, sp)
+    _audit_wan_sfp_i2c_bus(indices, sp)
+    _audit_network_topology(network_rows, sp)
 
     # 3. GPHY lane swap detection
     logger.info("Running GPHY lane swap detection")
-    _audit_gphy_lane_swap(indices, sp)
+    _audit_gphy_lane_swap(indices, sp, allowed_prefixes=_lane_swap_candidate_gphy_prefixes(network_rows))
 
     # 4. Device audit
     logger.info("Running device audit")
@@ -1042,6 +1269,7 @@ async def run_auditor(
     _reset_schema(schema_path)
     gpio_rows = _read_gpio_table(gpio_table)
     blockdiag_table = gpio_table.parent / "blockdiag.csv"
+    network_table = gpio_table.parent / "network.csv"
     logger.info("Read %d usable rows from %s", len(gpio_rows), gpio_table)
 
     if mode == "direct":
@@ -1050,6 +1278,7 @@ async def run_auditor(
             gpio_rows,
             schema_path,
             blockdiag_table=blockdiag_table,
+            network_table=network_table,
         )
     elif mode == "agent":
         logger.warning("Agent mode not yet implemented, falling back to direct")
@@ -1058,6 +1287,7 @@ async def run_auditor(
             gpio_rows,
             schema_path,
             blockdiag_table=blockdiag_table,
+            network_table=network_table,
         )
     else:
         raise ValueError(f"Unknown mode: {mode!r}. Use 'direct' or 'agent'.")

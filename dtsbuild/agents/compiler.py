@@ -24,9 +24,31 @@ logger = logging.getLogger(__name__)
 # ── Helpers ──────────────────────────────────────────────────────────
 
 _INDENT = "    "
-_ETHPHY_BOOLEAN_HINT_PROPERTIES = frozenset({"enet-phy-lane-swap"})
-_RESET_BUTTON_LINUX_CODE = "0x198"
 _I2C0_PINCTRL = "<&bsc_m0_scl_pin_28 &bsc_m0_sda_pin_29>"
+_RESET_BUTTON_BEHAVIOR_LINES = (
+    "press {",
+    '    print = "Button Press -- Hold for 5s to do restore to default";',
+    "};",
+    "hold {",
+    "    rst_to_dflt = <5>;",
+    "};",
+    "release {",
+    "    reset = <0>;",
+    "};",
+)
+_SES_BUTTON_BEHAVIOR_LINES = (
+    "press {",
+    '    print = "Session Button pressed";',
+    "};",
+    "release {",
+    "    ses_short_period = <0>;",
+    "    ses_long_period = <3>;",
+    "};",
+)
+_BUILTIN_WDT_CHIPS = frozenset({"BCM68375", "BCM68575"})
+_BUILTIN_CPUFREQ_CHIPS = frozenset({"BCM68375", "BCM68575"})
+_BUILTIN_XPORT_CHIPS = frozenset({"BCM68375", "BCM68575"})
+_BUILTIN_MDIO_CHIPS = frozenset({"BCM68375", "BCM68575"})
 _REFERENCE_RETENTION_EXCLUDE_PATTERNS = (
     re.compile(r"/lan_sfp(?:/|$)", re.IGNORECASE),
     re.compile(r"/.*voice", re.IGNORECASE),
@@ -83,11 +105,216 @@ def _find_signal(signals: list[Signal], *names: str) -> Signal | None:
     return None
 
 
+def _button_signal_groups(signals: list[Signal]) -> tuple[list[Signal], list[Signal]]:
+    """Return reset/ses button groups, falling back to generic BUTTON evidence."""
+    reset_signals = _signals_by_role(signals, "RESET_BUTTON")
+    ses_signals = _signals_by_role(signals, "SES_BUTTON")
+    if reset_signals or ses_signals:
+        return reset_signals, ses_signals
+
+    generic = _signals_by_role(signals, "BUTTON")
+    if not generic:
+        return [], []
+
+    reset_signals = [s for s in generic if "reset" in s.name.lower()]
+    ses_signals = [s for s in generic if "ses" in s.name.lower() or "wps" in s.name.lower()]
+    if not reset_signals and not ses_signals:
+        reset_signals = generic
+    return reset_signals, ses_signals
+
+
+def _button_behavior_lines(template: tuple[str, ...]) -> list[str]:
+    return [f"{_INDENT}{_INDENT}{_INDENT}{line}" for line in template]
+
+
+def _normalized_chip_name(chip: str) -> str:
+    return chip.strip().upper()
+
+
+def _chip_supports_builtin_node(chip: str, supported_chips: frozenset[str]) -> bool:
+    return _normalized_chip_name(chip) in supported_chips
+
+
+def _infer_usb_ports(signals: list[Signal]) -> list[int]:
+    ports: set[int] = set()
+    for signal in signals:
+        match = re.search(r"USB(\d+)", signal.name, re.IGNORECASE)
+        if not match:
+            continue
+        ports.add(int(match.group(1)) + 1)
+    return sorted(ports)
+
+
+def _infer_uart_instances(signals: list[Signal]) -> list[str]:
+    uart_signals = _signals_by_role(signals, "UART")
+    if not uart_signals:
+        return []
+
+    instances: set[str] = set()
+    for sig in uart_signals:
+        match = re.search(r"uart(\d+)", sig.name, re.IGNORECASE)
+        if match:
+            instances.add(match.group(1))
+        else:
+            instances.add("0")
+    return sorted(instances)
+
+
+def _infer_i2c_buses(signals: list[Signal], devices: list[Device]) -> list[str]:
+    i2c_signals = _signals_by_role(signals, "I2C")
+    i2c_devices = [d for d in devices if d.bus and "i2c" in d.bus.lower()]
+    if not i2c_signals and not i2c_devices:
+        return []
+
+    buses: set[str] = set()
+    for sig in i2c_signals:
+        match = re.search(r"i2c(\d+)", sig.name, re.IGNORECASE)
+        if match:
+            buses.add(f"i2c{match.group(1)}")
+        else:
+            buses.add("i2c0")
+    for dev in i2c_devices:
+        buses.add(dev.bus or "i2c0")
+    return sorted(buses)
+
+
+_WAN_SFP_GPIO_FACTS: tuple[tuple[str, str, str], ...] = (
+    ("WAN_SFP_RX_LOS", "los-gpio", "GPIO_ACTIVE_HIGH"),
+    ("WAN_SFP_PRESENT", "mod-def0-gpio", "GPIO_ACTIVE_LOW"),
+    ("WAN_XCVR_TXEN", "tx-power-gpio", "GPIO_ACTIVE_LOW"),
+    ("WAN_SFP_PD_RST", "tx-power-down-gpio", "GPIO_ACTIVE_HIGH"),
+    ("WAN_XCVR_RXEN", "rx-power-gpio", "GPIO_ACTIVE_LOW"),
+)
+
+
+def _wan_sfp_gpio_properties(signals: list[Signal]) -> list[tuple[str, int, str]]:
+    properties: list[tuple[str, int, str]] = []
+    for signal_name, property_name, polarity in _WAN_SFP_GPIO_FACTS:
+        signal = _find_signal(signals, signal_name)
+        if signal is None:
+            continue
+        gpio = _extract_gpio_num(signal.soc_pin)
+        if gpio is None:
+            continue
+        properties.append((property_name, int(gpio), polarity))
+    return properties
+
+
+def _wan_sfp_hint_value(hints: list[DtsHint], property_name: str) -> str | None:
+    for hint in hints:
+        if hint.target not in {"wan_sfp", "/wan_sfp"}:
+            continue
+        if hint.property != property_name or not hint.value:
+            continue
+        return hint.value
+    return None
+
+
+def _boolean_hints_for_target(
+    hints: list[DtsHint],
+    target: str,
+    *,
+    allowed: set[str],
+) -> list[str]:
+    properties: list[str] = []
+    for hint in hints:
+        if hint.target != target:
+            continue
+        if not hint.property or hint.value:
+            continue
+        if hint.property not in allowed:
+            continue
+        properties.append(hint.property)
+    return properties
+
+
+def _infer_serdes_instances(signals: list[Signal]) -> list[str]:
+    if _wan_sfp_gpio_properties(signals):
+        return ["0"]
+    if any(
+        signal.role.upper() == "SERDES"
+        and ("WAN" in signal.name.upper() or "SERDES0" in signal.name.upper())
+        for signal in signals
+    ):
+        return ["0"]
+    return []
+
+
 def _extract_ethphy_indices_from_text(text: str | None) -> set[int]:
     """Extract GPHY/XPHY indices mentioned in free-form ethphy evidence."""
     if not text:
         return set()
     return {int(match) for match in re.findall(r"(?:GPHY|XPHY)(\d+)", text.upper())}
+
+
+def _extract_xphy_index_from_target(target: str | None) -> int | None:
+    if not target:
+        return None
+    match = re.search(r"(?:^|/)xphy(\d+)(?:$|/)", target.lower())
+    if match:
+        return int(match.group(1))
+    match = re.search(r"\bxphy(\d+)\b", target.lower())
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _mdio_lane_swap_hints(hints: list[DtsHint]) -> list[DtsHint]:
+    return [
+        hint
+        for hint in hints
+        if hint.property == "enet-phy-lane-swap"
+        and _extract_xphy_index_from_target(hint.target) is not None
+    ]
+
+
+def _switch0_port_targets(hints: list[DtsHint]) -> list[str]:
+    return sorted({
+        hint.target
+        for hint in hints
+        if hint.target.startswith("&switch0/ports/")
+    })
+
+
+def _has_ethernet_topology_evidence(
+    signals: list[Signal],
+    hints: list[DtsHint],
+) -> bool:
+    network_roles = ("ETHERNET_PHY", "SFP", "SERDES")
+    if any(_signals_by_role(signals, role) for role in network_roles):
+        return True
+
+    network_targets = {
+        "ethphytop",
+        "&ethphytop",
+        "mdio",
+        "&mdio",
+        "mdio_bus",
+        "&mdio_bus",
+        "serdes",
+        "&serdes",
+        "wan_serdes",
+        "&wan_serdes",
+        "switch0",
+        "&switch0",
+        "phy_wan_serdes",
+        "&phy_wan_serdes",
+        "xport",
+        "&xport",
+    }
+    return bool(_mdio_lane_swap_hints(hints)) or bool(_switch0_port_targets(hints)) or any(
+        hint.target in network_targets for hint in hints
+    )
+
+
+def _has_mdio_management_evidence(
+    signals: list[Signal],
+    hints: list[DtsHint],
+) -> bool:
+    return bool(_mdio_lane_swap_hints(hints)) or any(
+        _signals_by_role(signals, role)
+        for role in ("ETHERNET_PHY", "SFP", "SERDES")
+    )
 
 
 def _led_endpoint_signals(signals: list[Signal]) -> list[Signal]:
@@ -146,8 +373,7 @@ def _render_root(schema: HardwareSchema) -> str:
 
 def _render_buttons(signals: list[Signal]) -> str:
     """Render buttons { ... } block for RESET_BUTTON / SES_BUTTON signals."""
-    reset_signals = _signals_by_role(signals, "RESET_BUTTON")
-    ses_signals = _signals_by_role(signals, "SES_BUTTON")
+    reset_signals, ses_signals = _button_signal_groups(signals)
 
     if not reset_signals and not ses_signals:
         return ""
@@ -167,7 +393,7 @@ def _render_buttons(signals: list[Signal]) -> str:
             f"{_INDENT}{_INDENT}{_INDENT}ext_irq-gpio = <&gpioc {gpio} GPIO_ACTIVE_LOW>;",
             f"{_INDENT}{_INDENT}{_INDENT}interrupt-parent = <&gpioc>;",
             f"{_INDENT}{_INDENT}{_INDENT}interrupts = <{gpio} IRQ_TYPE_EDGE_FALLING>;",
-            f"{_INDENT}{_INDENT}{_INDENT}linux,code = <{_RESET_BUTTON_LINUX_CODE}>;",
+            *_button_behavior_lines(_RESET_BUTTON_BEHAVIOR_LINES),
             f"{_INDENT}{_INDENT}}};",
         ])
 
@@ -180,6 +406,7 @@ def _render_buttons(signals: list[Signal]) -> str:
             f"{_INDENT}{_INDENT}{_INDENT}ext_irq-gpio = <&gpioc {gpio} GPIO_ACTIVE_LOW>;",
             f"{_INDENT}{_INDENT}{_INDENT}interrupt-parent = <&gpioc>;",
             f"{_INDENT}{_INDENT}{_INDENT}interrupts = <{gpio} IRQ_TYPE_EDGE_FALLING>;",
+            *_button_behavior_lines(_SES_BUTTON_BEHAVIOR_LINES),
             f"{_INDENT}{_INDENT}}};",
         ])
 
@@ -187,70 +414,38 @@ def _render_buttons(signals: list[Signal]) -> str:
     return "\n".join(lines)
 
 
-def _render_wan_sfp(signals: list[Signal]) -> str:
+def _render_wan_sfp(signals: list[Signal], hints: list[DtsHint] | None = None) -> str:
     """Render wan_sfp { ... } in the root node from verified SFP GPIO evidence."""
-    los = _find_signal(signals, "WAN_SFP_RX_LOS")
-    present = _find_signal(signals, "WAN_SFP_PRESENT")
-    tx_power = _find_signal(signals, "WAN_XCVR_TXEN")
-    tx_power_down = _find_signal(signals, "WAN_SFP_PD_RST")
-    rx_power = _find_signal(signals, "WAN_XCVR_RXEN")
-
-    required = [los, present, tx_power, tx_power_down, rx_power]
-    if any(signal is None for signal in required):
+    gpio_properties = _wan_sfp_gpio_properties(signals)
+    if not gpio_properties:
         return ""
-
-    gpio_nums = [
-        _extract_gpio_num(signal.soc_pin)
-        for signal in required
-        if signal is not None
-    ]
-    if len(gpio_nums) != 5 or any(gpio is None for gpio in gpio_nums):
-        return ""
-
-    los_gpio, present_gpio, tx_power_gpio, tx_power_down_gpio, rx_power_gpio = [
-        int(gpio)
-        for gpio in gpio_nums
-        if gpio is not None
-    ]
+    hint_list = hints or []
 
     lines = [
         "",
         f"{_INDENT}wan_sfp: wan_sfp {{",
-        f'{_INDENT}{_INDENT}pinctrl-names = "default", "tx-sd", "eth";',
-        f"{_INDENT}{_INDENT}pinctrl-0 = <&wan0_lbe_pin_30>;",
-        f"{_INDENT}{_INDENT}pinctrl-1 = <&wan0_lbe_pin_30 &rogue_onu_in0_pin_27>;",
-        f"{_INDENT}{_INDENT}pinctrl-2 = <>;",
         f'{_INDENT}{_INDENT}compatible = "brcm,sfp";',
-        f"{_INDENT}{_INDENT}i2c-bus = <&i2c0>;",
-        f"{_INDENT}{_INDENT}los-gpio = <&gpioc {los_gpio} GPIO_ACTIVE_HIGH>;",
-        f"{_INDENT}{_INDENT}mod-def0-gpio = <&gpioc {present_gpio} GPIO_ACTIVE_LOW>;",
-        f"{_INDENT}{_INDENT}tx-power-gpio = <&gpioc {tx_power_gpio} GPIO_ACTIVE_LOW>;",
-        f"{_INDENT}{_INDENT}tx-power-down-gpio = <&gpioc {tx_power_down_gpio} GPIO_ACTIVE_HIGH>;",
-        f"{_INDENT}{_INDENT}rx-power-gpio = <&gpioc {rx_power_gpio} GPIO_ACTIVE_LOW>;",
-        f"{_INDENT}{_INDENT}tx-disable-gpio = <&gpioc 30 GPIO_ACTIVE_HIGH>;",
+    ]
+    i2c_bus = _wan_sfp_hint_value(hint_list, "i2c-bus")
+    if i2c_bus:
+        lines.append(f"{_INDENT}{_INDENT}i2c-bus = {i2c_bus};")
+    for property_name, gpio, polarity in gpio_properties:
+        lines.append(f"{_INDENT}{_INDENT}{property_name} = <&gpioc {gpio} {polarity}>;")
+    lines.extend([
         f'{_INDENT}{_INDENT}status = "okay";',
         f"{_INDENT}}};",
-    ]
+    ])
     return "\n".join(lines)
 
 
 def _render_uart(signals: list[Signal]) -> str:
     """Render &uart0 { status = "okay"; }; for UART signals."""
-    uart_signals = _signals_by_role(signals, "UART")
-    if not uart_signals:
+    instances = _infer_uart_instances(signals)
+    if not instances:
         return ""
 
-    # Determine which UART instances are used
-    instances: set[str] = set()
-    for sig in uart_signals:
-        m = re.search(r"uart(\d+)", sig.name, re.IGNORECASE)
-        if m:
-            instances.add(m.group(1))
-        else:
-            instances.add("0")
-
     lines = []
-    for inst in sorted(instances):
+    for inst in instances:
         lines.extend([
             "",
             f"&uart{inst} {{",
@@ -260,10 +455,10 @@ def _render_uart(signals: list[Signal]) -> str:
     return "\n".join(lines)
 
 
-def _render_wdt(signals: list[Signal]) -> str:
-    """Render &wdt { status = "okay"; }; for WATCHDOG signals."""
+def _render_wdt(schema: HardwareSchema, signals: list[Signal]) -> str:
+    """Render &wdt for chips with built-in watchdog capability or explicit evidence."""
     wdt_signals = _signals_by_role(signals, "WATCHDOG")
-    if not wdt_signals:
+    if not wdt_signals and not _chip_supports_builtin_node(schema.chip, _BUILTIN_WDT_CHIPS):
         return ""
     return "\n".join([
         "",
@@ -271,6 +466,108 @@ def _render_wdt(signals: list[Signal]) -> str:
         f'{_INDENT}status = "okay";',
         "};",
     ])
+
+
+def _render_cpufreq(schema: HardwareSchema) -> str:
+    """Render cpufreq policy for chips whose ref policy is approved for reuse."""
+    if not _chip_supports_builtin_node(schema.chip, _BUILTIN_CPUFREQ_CHIPS):
+        return ""
+    return "\n".join([
+        "",
+        "&cpufreq {",
+        f'{_INDENT}op-mode = "dvfs";',
+        "};",
+    ])
+
+
+def _render_xport(
+    schema: HardwareSchema,
+    signals: list[Signal],
+    hints: list[DtsHint],
+) -> str:
+    """Render &xport when the SoC supports it and board topology proves Ethernet use."""
+    if not _chip_supports_builtin_node(schema.chip, _BUILTIN_XPORT_CHIPS):
+        return ""
+    if not _has_ethernet_topology_evidence(signals, hints):
+        return ""
+    return "\n".join([
+        "",
+        "&xport {",
+        f'{_INDENT}status = "okay";',
+        "};",
+    ])
+
+
+def _render_switch0(hints: list[DtsHint]) -> str:
+    """Render &switch0 port children from stable topology hints."""
+    port_targets = _switch0_port_targets(hints)
+    if not port_targets:
+        return ""
+
+    lines = [
+        "",
+        "&switch0 {",
+        f"{_INDENT}ports {{",
+    ]
+    for target in port_targets:
+        port_name = target.split("/ports/", 1)[1]
+        lines.extend([
+            f"{_INDENT}{_INDENT}{port_name} {{",
+            f'{_INDENT}{_INDENT}{_INDENT}status = "okay";',
+            f"{_INDENT}{_INDENT}}};",
+        ])
+    lines.extend([
+        f"{_INDENT}}};",
+        "};",
+    ])
+    return "\n".join(lines)
+
+
+def _render_mdio(
+    schema: HardwareSchema,
+    signals: list[Signal],
+    hints: list[DtsHint],
+) -> str:
+    """Render &mdio when the SoC supports it and board management paths are proven."""
+    if not _chip_supports_builtin_node(schema.chip, _BUILTIN_MDIO_CHIPS):
+        return ""
+    if not _has_mdio_management_evidence(signals, hints):
+        return ""
+    return "\n".join([
+        "",
+        "&mdio {",
+        f'{_INDENT}status = "okay";',
+        "};",
+    ])
+
+
+def _render_mdio_bus(signals: list[Signal], hints: list[DtsHint]) -> str:
+    """Render per-xphy MDIO children for independently proven lane-swap evidence."""
+    del signals
+    lane_swap_indices = sorted({
+        idx
+        for idx in (
+            _extract_xphy_index_from_target(hint.target)
+            for hint in _mdio_lane_swap_hints(hints)
+        )
+        if idx is not None
+    })
+    if not lane_swap_indices:
+        return ""
+
+    lines = [
+        "",
+        "&mdio_bus {",
+    ]
+    for idx in lane_swap_indices:
+        lines.extend([
+            f"{_INDENT}xphy{idx} {{",
+            f'{_INDENT}{_INDENT}status = "okay";',
+            f"{_INDENT}{_INDENT}enet-phy-lane-swap;  /* Lane swap traced for GPHY{idx} */",
+            f"{_INDENT}}};",
+        ])
+    lines.append("};")
+    return "\n".join(lines)
 
 
 def _render_hsspi(signals: list[Signal]) -> str:
@@ -309,17 +606,9 @@ def _render_led_ctrl(signals: list[Signal], devices: list[Device]) -> str:
         num_shifters = len(shift_regs)
         lines.append(f"{_INDENT}serial-shifters-installed = <{num_shifters}>;")
 
-    # Emit individual LED nodes from LED signals
-    for i, sig in enumerate(led_signals):
-        led_name = sig.name.lower().replace(" ", "_")
-        lines.extend([
-            "",
-            f"{_INDENT}led{i}: serial-{led_name} {{",
-            f"{_INDENT}{_INDENT}active_low;",
-            f"{_INDENT}{_INDENT}crossbar-output = <{i}>;",
-            f'{_INDENT}{_INDENT}status = "okay";',
-            f"{_INDENT}}};",
-        ])
+    # Child LED nodes need explicit circuit/controller mapping; do not guess
+    # crossbar-output or per-LED children from endpoint signal ordering alone.
+    del led_signals
 
     lines.extend([
         "",
@@ -333,7 +622,8 @@ def _render_ethphy(signals: list[Signal], hints: list[DtsHint]) -> str:
     """Render &ethphytop { ... } for ETHERNET_PHY signals."""
     eth_signals = _signals_by_role(signals, "ETHERNET_PHY")
     ethphy_hints = [h for h in hints if h.target in ("ethphytop", "&ethphytop")]
-    if not eth_signals and not ethphy_hints:
+    mdio_lane_swap_hints = _mdio_lane_swap_hints(hints)
+    if not eth_signals and not ethphy_hints and not mdio_lane_swap_hints:
         return ""
 
     lines = [
@@ -348,46 +638,30 @@ def _render_ethphy(signals: list[Signal], hints: list[DtsHint]) -> str:
         if m:
             enabled_phys.add(int(m.group(1)))
     for hint in ethphy_hints:
+        if hint.property:
+            enabled_match = re.fullmatch(r"xphy(\d+)-enabled", hint.property)
+            if enabled_match:
+                enabled_phys.add(int(enabled_match.group(1)))
         enabled_phys.update(_extract_ethphy_indices_from_text(hint.value))
         enabled_phys.update(_extract_ethphy_indices_from_text(hint.reason))
+    for hint in mdio_lane_swap_hints:
+        idx = _extract_xphy_index_from_target(hint.target)
+        if idx is not None:
+            enabled_phys.add(idx)
 
     for phy_idx in sorted(enabled_phys):
         lines.append(f"{_INDENT}xphy{phy_idx}-enabled;")
 
-    lane_swap_from_hints = False
+    rendered_boolean_props = {f"xphy{phy_idx}-enabled" for phy_idx in enabled_phys}
     for hint in ethphy_hints:
         if not hint.property:
             continue
-        if hint.property in _ETHPHY_BOOLEAN_HINT_PROPERTIES:
-            lane_swap_from_hints = True
+        if hint.property in rendered_boolean_props and not hint.value:
             continue
         if hint.value:
             lines.append(f"{_INDENT}{hint.property} = {hint.value};")
         else:
             lines.append(f"{_INDENT}{hint.property};")
-
-    # Check signals for swap_detected
-    lane_swap_comment = None
-    for sig in eth_signals:
-        if sig.swap_detected:
-            lane_swap_comment = sig.swap_detail or sig.name
-            break
-    if lane_swap_comment is None and lane_swap_from_hints:
-        hinted_phys = sorted({
-            idx
-            for hint in ethphy_hints
-            for idx in (
-                _extract_ethphy_indices_from_text(hint.value)
-                | _extract_ethphy_indices_from_text(hint.reason)
-            )
-        })
-        if hinted_phys:
-            lane_swap_comment = "Lane swap traced for " + ", ".join(
-                f"GPHY{idx}" for idx in hinted_phys
-            )
-    if lane_swap_comment or lane_swap_from_hints:
-        comment = f"  /* {lane_swap_comment} */" if lane_swap_comment else ""
-        lines.append(f"{_INDENT}enet-phy-lane-swap;{comment}")
 
     lines.extend([
         f'{_INDENT}status = "okay";',
@@ -396,7 +670,31 @@ def _render_ethphy(signals: list[Signal], hints: list[DtsHint]) -> str:
     return "\n".join(lines)
 
 
-def _render_i2c(signals: list[Signal], devices: list[Device]) -> str:
+def _reference_i2c_device_label(
+    reference_doc: Any | None,
+    *,
+    bus: str,
+    addr_hex: str,
+    compatible: str,
+) -> str | None:
+    if reference_doc is None:
+        return None
+    ref_nodes = reference_doc.node_index().get(f"/&{bus}/gpio@{addr_hex}", [])
+    for node in ref_nodes:
+        if node.label is None:
+            continue
+        compatible_prop = node.properties.get("compatible")
+        if compatible_prop is not None and compatible_prop.value == f'"{compatible}"':
+            return node.label
+    return None
+
+
+def _render_i2c(
+    signals: list[Signal],
+    devices: list[Device],
+    *,
+    reference_doc: Any | None = None,
+) -> str:
     """Render &i2c0/i2c1 { ... } with device sub-nodes."""
     i2c_signals = _signals_by_role(signals, "I2C")
     i2c_devices = [d for d in devices if d.bus and "i2c" in d.bus.lower()]
@@ -411,19 +709,11 @@ def _render_i2c(signals: list[Signal], devices: list[Device]) -> str:
         bus_devices.setdefault(bus, []).append(dev)
 
     # Determine which I2C buses are used
-    buses: set[str] = set()
-    for sig in i2c_signals:
-        m = re.search(r"i2c(\d+)", sig.name, re.IGNORECASE)
-        if m:
-            buses.add(f"i2c{m.group(1)}")
-        else:
-            buses.add("i2c0")
-    for bus in bus_devices:
-        buses.add(bus)
+    buses = _infer_i2c_buses(signals, devices)
 
     output_parts = []
 
-    for bus in sorted(buses):
+    for bus in buses:
         lines = [
             "",
             f"&{bus} {{",
@@ -439,7 +729,12 @@ def _render_i2c(signals: list[Signal], devices: list[Device]) -> str:
             compat = dev.compatible or f"unknown,{dev.part_number.lower()}"
             addr = dev.address or "0x00"
             addr_hex = addr.replace("0x", "")
-            label = dev.refdes.lower()
+            label = _reference_i2c_device_label(
+                reference_doc,
+                bus=bus,
+                addr_hex=addr_hex,
+                compatible=compat,
+            ) or dev.refdes.lower()
 
             lines.extend([
                 "",
@@ -458,11 +753,18 @@ def _render_i2c(signals: list[Signal], devices: list[Device]) -> str:
     return "\n".join(output_parts)
 
 
-def _render_usb(signals: list[Signal]) -> str:
+def _render_usb(signals: list[Signal], hints: list[DtsHint] | None = None) -> str:
     """Render &usb_ctrl { ... } for USB signals."""
     usb_signals = _signals_by_role(signals, "USB")
     if not usb_signals:
         return ""
+
+    usb_ports = _infer_usb_ports(usb_signals)
+    usb_ctrl_props = _boolean_hints_for_target(
+        hints or [],
+        "&usb_ctrl",
+        allowed={"port1-disabled"},
+    )
 
     lines = [
         "",
@@ -471,22 +773,27 @@ def _render_usb(signals: list[Signal]) -> str:
         f"{_INDENT}pinctrl-0 = <&usb0_pwr_pins &usb1_pwr_pins>;",
         f"{_INDENT}xhci-enable;",
         f'{_INDENT}status = "okay";',
+    ]
+    for prop in usb_ctrl_props:
+        lines.append(f"{_INDENT}{prop};")
+    lines.extend([
         "};",
         "",
         "&usb0_xhci {",
         f'{_INDENT}status = "okay";',
-        "",
-        f"{_INDENT}usb_port1: port1 {{",
-        f"{_INDENT}{_INDENT}reg = <1>;",
-        f"{_INDENT}{_INDENT}#trigger-source-cells = <0>;",
-        f"{_INDENT}}};",
-        "",
-        f"{_INDENT}usb_port2: port2 {{",
-        f"{_INDENT}{_INDENT}reg = <2>;",
-        f"{_INDENT}{_INDENT}#trigger-source-cells = <0>;",
-        f"{_INDENT}}};",
         "};",
-    ]
+    ])
+    if usb_ports:
+        lines.pop()
+        for port in usb_ports:
+            lines.extend([
+                "",
+                f"{_INDENT}usb_port{port}: port{port} {{",
+                f"{_INDENT}{_INDENT}reg = <{port}>;",
+                f"{_INDENT}{_INDENT}#trigger-source-cells = <0>;",
+                f"{_INDENT}}};",
+            ])
+        lines.append("};")
     return "\n".join(lines)
 
 
@@ -550,11 +857,8 @@ def _render_pcie(signals: list[Signal]) -> str:
 
 def _render_serdes(signals: list[Signal]) -> str:
     """Render &wan_serdes { ... } for SFP / SERDES signals."""
-    sfp_signals = _signals_by_role(signals, "SFP")
-    serdes_signals = _signals_by_role(signals, "SERDES")
-    all_signals = sfp_signals + serdes_signals
-
-    if not all_signals:
+    serdes_instances = _infer_serdes_instances(signals)
+    if not serdes_instances:
         return ""
 
     lines = [
@@ -563,14 +867,7 @@ def _render_serdes(signals: list[Signal]) -> str:
         f'{_INDENT}status = "okay";',
     ]
 
-    # Group SFP signals by serdes instance
-    serdes_instances: dict[str, list[Signal]] = {}
-    for sig in all_signals:
-        m = re.search(r"(\d+)", sig.name)
-        inst = m.group(1) if m else "0"
-        serdes_instances.setdefault(inst, []).append(sig)
-
-    for inst in sorted(serdes_instances):
+    for inst in serdes_instances:
         lines.extend([
             "",
             f"{_INDENT}serdes{inst} {{",
@@ -582,9 +879,33 @@ def _render_serdes(signals: list[Signal]) -> str:
     return "\n".join(lines)
 
 
+def _render_serdes_core(signals: list[Signal]) -> str:
+    """Render &serdes when board evidence proves SerDes path usage."""
+    if not _infer_serdes_instances(signals):
+        return ""
+    return "\n".join([
+        "",
+        "&serdes {",
+        f'{_INDENT}status = "okay";',
+        "};",
+    ])
+
+
+def _render_phy_wan_serdes(signals: list[Signal]) -> str:
+    """Render &phy_wan_serdes when wan_sfp or serdes0 path is proven."""
+    if "0" not in _infer_serdes_instances(signals):
+        return ""
+    return "\n".join([
+        "",
+        "&phy_wan_serdes {",
+        f'{_INDENT}status = "okay";',
+        "};",
+    ])
+
+
 def _render_power_ctrl(signals: list[Signal]) -> str:
     """Render power control nodes."""
-    pwr_signals = _signals_by_role(signals, "POWER")
+    pwr_signals = _signals_by_role(signals, "POWER_CONTROL")
     if not pwr_signals:
         return ""
 
@@ -630,6 +951,57 @@ def _render_power_ctrl(signals: list[Signal]) -> str:
     return "\n".join(lines)
 
 
+def _render_gpioc_wifi_hogs(signals: list[Signal]) -> str:
+    """Render Wi-Fi RF_DISABLE/PEWAKE gpio-hogs under &gpioc."""
+    wifi_signals = _signals_by_role(signals, "PCIE_WIFI")
+    if not wifi_signals:
+        return ""
+
+    def _signal_sort_key(sig: Signal) -> tuple[int, str]:
+        match = re.search(r"(\d+)G", sig.name.upper())
+        band = int(match.group(1)) if match else 999
+        return (band, sig.name)
+
+    rf_disable = sorted(
+        [sig for sig in wifi_signals if "RF_DISABLE" in sig.name.upper()],
+        key=_signal_sort_key,
+    )
+    pewake = sorted(
+        [sig for sig in wifi_signals if "PEWAKE" in sig.name.upper()],
+        key=_signal_sort_key,
+    )
+    if not rf_disable and not pewake:
+        return ""
+
+    lines = [
+        "",
+        "&gpioc {",
+    ]
+
+    def _append_hog(sig: Signal, *, polarity: str, output_state: str) -> None:
+        gpio = _extract_gpio_num(sig.soc_pin)
+        if gpio is None:
+            return
+        lines.extend([
+            f"{_INDENT}pin{gpio} {{",
+            f"{_INDENT}{_INDENT}gpio-hog;",
+            f"{_INDENT}{_INDENT}gpios = <{gpio} {polarity}>;",
+            f"{_INDENT}{_INDENT}{output_state};",
+            f'{_INDENT}{_INDENT}line-name = "{sig.name}";',
+            f"{_INDENT}}};",
+        ])
+
+    for sig in rf_disable:
+        _append_hog(sig, polarity="GPIO_ACTIVE_LOW", output_state="output-low")
+    if rf_disable and pewake:
+        lines.append("")
+    for sig in pewake:
+        _append_hog(sig, polarity="GPIO_ACTIVE_HIGH", output_state="output-high")
+
+    lines.append("};")
+    return "\n".join(lines)
+
+
 def _pick_primary_power_signal(signals: list[Signal]) -> Signal | None:
     """Pick the most likely primary board power-enable signal."""
     if not signals:
@@ -666,7 +1038,11 @@ def _pick_phy_power_signal(signals: list[Signal]) -> Signal | None:
     return None
 
 
-def _render_dts_hints(hints: list[DtsHint], already_rendered: set[str]) -> str:
+def _render_dts_hints(
+    hints: list[DtsHint],
+    already_rendered: set[str],
+    reference_doc: Any | None = None,
+) -> str:
     """Render DTS hints that haven't been covered by other render functions."""
     remaining = [h for h in hints if h.target not in already_rendered]
     if not remaining:
@@ -678,7 +1054,13 @@ def _render_dts_hints(hints: list[DtsHint], already_rendered: set[str]) -> str:
         by_target.setdefault(h.target, []).append(h)
 
     lines = []
-    for target, target_hints in sorted(by_target.items()):
+    for target, target_hints in sorted(
+        by_target.items(),
+        key=lambda item: (
+            _reference_sort_line(reference_doc, (item[0],)) or 10**9,
+            item[0],
+        ),
+    ):
         ref = target if target.startswith("&") else f"&{target}"
         lines.extend([
             "",
@@ -845,6 +1227,56 @@ def _should_exclude_reference_i2c1_snippet(
     )
 
 
+def _should_exclude_reference_button_snippet(
+    snippet_text: str,
+    signals: list[Signal],
+) -> bool:
+    reset_signals, ses_signals = _button_signal_groups(signals)
+    if "ses_button" in snippet_text and not ses_signals:
+        return True
+    if "reset_button" in snippet_text and not reset_signals:
+        return True
+    return False
+
+
+def _sanitize_reference_mdio_bus_snippet(snippet: list[str]) -> list[str]:
+    if "&mdio_bus" not in "\n".join(snippet):
+        return snippet
+
+    sanitized: list[str] = []
+    idx = 0
+    while idx < len(snippet):
+        line = snippet[idx]
+        if re.match(r"\s*serdes\d+\s*\{", line):
+            block = [line]
+            depth = line.count("{") - line.count("}")
+            idx += 1
+            while idx < len(snippet):
+                block_line = snippet[idx]
+                block.append(block_line)
+                depth += block_line.count("{") - block_line.count("}")
+                idx += 1
+                if depth <= 0:
+                    break
+            if any("lan_sfp" in block_line for block_line in block):
+                continue
+            sanitized.extend(block)
+            continue
+        sanitized.append(line)
+        idx += 1
+    return sanitized
+
+
+def _sanitize_reference_snippet(snippet: list[str], signals: list[Signal]) -> list[str]:
+    del signals
+    sanitized = _sanitize_reference_mdio_bus_snippet(snippet)
+    return [
+        line
+        for line in sanitized
+        if not re.search(r"\blinux,(?:code|press|release)\b", line, flags=re.IGNORECASE)
+    ]
+
+
 def _should_exclude_reference_snippet(
     snippet: list[str],
     signals: list[Signal],
@@ -853,6 +1285,7 @@ def _should_exclude_reference_snippet(
     return (
         any(pattern.search(snippet_text) for pattern in _REFERENCE_RETENTION_EXCLUDE_SNIPPET_PATTERNS)
         or _should_exclude_reference_i2c1_snippet(snippet_text, signals)
+        or _should_exclude_reference_button_snippet(snippet_text, signals)
     )
 
 
@@ -874,6 +1307,46 @@ def _reference_target_line(reference_doc: Any, target: str) -> int | None:
     if not ref_nodes:
         return None
     return ref_nodes[0].start_line
+
+
+def _normalize_reference_sort_target(target: str) -> str:
+    if ":" in target:
+        node_path, prop_name = target.rsplit(":", 1)
+        return f"{_normalize_reference_sort_target(node_path)}:{prop_name}"
+    if target.startswith("/"):
+        return target
+    if target.startswith("&"):
+        return f"/{target}"
+    return f"/&{target}"
+
+
+def _reference_sort_line(reference_doc: Any | None, targets: tuple[str, ...]) -> int | None:
+    if reference_doc is None:
+        return None
+    lines = [
+        line
+        for target in targets
+        if (line := _reference_target_line(reference_doc, _normalize_reference_sort_target(target))) is not None
+    ]
+    return min(lines) if lines else None
+
+
+def _ordered_block_texts(
+    blocks: list[tuple[int, str, tuple[str, ...]]],
+    reference_doc: Any | None,
+) -> list[str]:
+    ordered = sorted(
+        [
+            (fallback_order, text, reference_targets)
+            for fallback_order, text, reference_targets in blocks
+            if text
+        ],
+        key=lambda item: (
+            _reference_sort_line(reference_doc, item[2]) or 10**9,
+            item[0],
+        ),
+    )
+    return [text for _, text, _ in ordered]
 
 
 def _parent_node_path(path: str) -> str | None:
@@ -1068,6 +1541,9 @@ def _apply_inline_reference_retention(
         snippet = _extract_reference_snippet(reference_lines, reference_doc, candidate.target)
         if not snippet:
             continue
+        snippet = _sanitize_reference_snippet(snippet, signals)
+        if not snippet:
+            continue
         if _should_exclude_reference_snippet(snippet, signals):
             continue
 
@@ -1123,6 +1599,7 @@ async def _compile_direct(
     verified_sigs = schema.verified_signals()
     verified_devs = schema.verified_devices()
     all_hints = schema.dts_hints
+    reference_doc = parse_dts_document(ref_dts_path) if ref_dts_path and ref_dts_path.exists() else None
 
     logger.info(
         "Compiling DTS: %d verified signals, %d verified devices, %d hints",
@@ -1139,63 +1616,128 @@ async def _compile_direct(
 
     # 3. Buttons inside root node
     buttons_block = _render_buttons(verified_sigs)
-    if buttons_block:
-        parts.append(buttons_block)
-
-    wan_sfp_block = _render_wan_sfp(verified_sigs)
-    if wan_sfp_block:
-        parts.append(wan_sfp_block)
+    wan_sfp_block = _render_wan_sfp(verified_sigs, all_hints)
+    parts.extend(
+        _ordered_block_texts(
+            [
+                (0, buttons_block, ("/buttons",)),
+                (1, wan_sfp_block, ("/wan_sfp",)),
+            ],
+            reference_doc,
+        )
+    )
 
     # Close root node
     parts.append("};")
 
     # Track which hint targets are already rendered by specific renderers
     rendered_targets: set[str] = set()
+    overlay_blocks: list[tuple[int, str, tuple[str, ...]]] = []
+    if buttons_block:
+        rendered_targets.update({"buttons", "/buttons"})
+    if wan_sfp_block:
+        rendered_targets.update({"wan_sfp", "/wan_sfp"})
 
     # 4. Subsystem overlay nodes (outside root)
     uart_block = _render_uart(verified_sigs)
     if uart_block:
-        parts.append(uart_block)
+        overlay_blocks.append(
+            (0, uart_block, tuple(f"/&uart{inst}" for inst in _infer_uart_instances(verified_sigs)))
+        )
 
-    wdt_block = _render_wdt(verified_sigs)
+    wdt_block = _render_wdt(schema, verified_sigs)
     if wdt_block:
-        parts.append(wdt_block)
+        overlay_blocks.append((1, wdt_block, ("/&wdt",)))
+        rendered_targets.update({"wdt", "&wdt"})
+
+    cpufreq_block = _render_cpufreq(schema)
+    if cpufreq_block:
+        overlay_blocks.append((2, cpufreq_block, ("/&cpufreq",)))
+        rendered_targets.update({"cpufreq", "&cpufreq"})
+
+    xport_block = _render_xport(schema, verified_sigs, all_hints)
+    if xport_block:
+        overlay_blocks.append((3, xport_block, ("/&xport",)))
+        rendered_targets.update({"xport", "&xport"})
+
+    switch0_block = _render_switch0(all_hints)
+    if switch0_block:
+        overlay_blocks.append((4, switch0_block, ("/&switch0",)))
+        rendered_targets.update({"switch0", "&switch0"})
+        rendered_targets.update(_switch0_port_targets(all_hints))
 
     hsspi_block = _render_hsspi(verified_sigs)
     if hsspi_block:
-        parts.append(hsspi_block)
+        overlay_blocks.append((5, hsspi_block, ("/&hsspi",)))
 
     led_block = _render_led_ctrl(verified_sigs, verified_devs)
     if led_block:
-        parts.append(led_block)
+        overlay_blocks.append((6, led_block, ("/&led_ctrl",)))
 
     ethphy_block = _render_ethphy(verified_sigs, all_hints)
     if ethphy_block:
-        parts.append(ethphy_block)
+        overlay_blocks.append((7, ethphy_block, ("/&ethphytop",)))
         rendered_targets.update({"ethphytop", "&ethphytop"})
 
-    i2c_block = _render_i2c(verified_sigs, verified_devs)
-    if i2c_block:
-        parts.append(i2c_block)
+    mdio_block = _render_mdio(schema, verified_sigs, all_hints)
+    if mdio_block:
+        overlay_blocks.append((8, mdio_block, ("/&mdio",)))
+        rendered_targets.update({"mdio", "&mdio"})
 
-    usb_block = _render_usb(verified_sigs)
+    mdio_bus_block = _render_mdio_bus(verified_sigs, all_hints)
+    if mdio_bus_block:
+        overlay_blocks.append((9, mdio_bus_block, ("/&mdio_bus",)))
+        rendered_targets.update({"mdio_bus", "&mdio_bus"})
+        rendered_targets.update(hint.target for hint in _mdio_lane_swap_hints(all_hints))
+
+    i2c_block = _render_i2c(verified_sigs, verified_devs, reference_doc=reference_doc)
+    if i2c_block:
+        overlay_blocks.append(
+            (10, i2c_block, tuple(f"/&{bus}" for bus in _infer_i2c_buses(verified_sigs, verified_devs)))
+        )
+
+    usb_block = _render_usb(verified_sigs, all_hints)
     if usb_block:
-        parts.append(usb_block)
+        overlay_blocks.append((11, usb_block, ("/&usb_ctrl", "/&usb0_xhci")))
+        rendered_targets.update({"usb_ctrl", "&usb_ctrl", "usb0_xhci", "&usb0_xhci"})
 
     pcie_block = _render_pcie(verified_sigs)
     if pcie_block:
-        parts.append(pcie_block)
+        overlay_blocks.append(
+            (
+                16,
+                pcie_block,
+                tuple(f"/&pcie{inst}" for inst in infer_pcie_instances(sig.name for sig in verified_sigs)),
+            )
+        )
 
     serdes_block = _render_serdes(verified_sigs)
     if serdes_block:
-        parts.append(serdes_block)
+        overlay_blocks.append((13, serdes_block, ("/&wan_serdes",)))
+        rendered_targets.update({"wan_serdes", "&wan_serdes"})
+
+    serdes_core_block = _render_serdes_core(verified_sigs)
+    if serdes_core_block:
+        overlay_blocks.append((13, serdes_core_block, ("/&serdes",)))
+        rendered_targets.update({"serdes", "&serdes"})
+
+    phy_wan_serdes_block = _render_phy_wan_serdes(verified_sigs)
+    if phy_wan_serdes_block:
+        overlay_blocks.append((13, phy_wan_serdes_block, ("/&phy_wan_serdes",)))
+        rendered_targets.update({"phy_wan_serdes", "&phy_wan_serdes"})
+
+    gpioc_block = _render_gpioc_wifi_hogs(verified_sigs)
+    if gpioc_block:
+        overlay_blocks.append((15, gpioc_block, ("/&ext_pwr_ctrl", "/&gpioc")))
 
     pwr_block = _render_power_ctrl(verified_sigs)
     if pwr_block:
-        parts.append(pwr_block)
+        overlay_blocks.append((14, pwr_block, ("/&ext_pwr_ctrl",)))
+
+    parts.extend(_ordered_block_texts(overlay_blocks, reference_doc))
 
     # 5. Remaining DTS hints
-    hints_block = _render_dts_hints(all_hints, rendered_targets)
+    hints_block = _render_dts_hints(all_hints, rendered_targets, reference_doc=reference_doc)
     if hints_block:
         parts.append(hints_block)
 

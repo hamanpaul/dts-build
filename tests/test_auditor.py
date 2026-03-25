@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 from dtsbuild.agents.auditor import _classify_signal_role, _read_gpio_table, run_auditor
 from dtsbuild.schema_io import load_schema
@@ -111,6 +112,53 @@ def test_run_auditor_records_usb_signals_from_blockdiag_and_page_scan(tmp_path):
         assert signal.provenance.method == "blockdiag+page_scan"
 
 
+def test_run_auditor_records_usb_port1_disabled_hint_from_single_port_page(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "blockdiag.csv").write_text(
+        "domain,interface,present,controller,endpoint,page_ref,notes\n"
+        "usb,usb2,true,usb2,usb,mainboard:15,USB subsystem present\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+    indices = {
+        "page_indices": {
+            "mainboard": {
+                15: "\n".join(
+                    [
+                        "USB0_VBUS",
+                        "USB0_DP",
+                        "USB0_DM",
+                        "USB0_SSRXN",
+                        "USB1_DP",
+                        "USB1_DM",
+                        "USB1_ID",
+                        "USB1_PWRON",
+                        "J33",
+                        "J34",
+                    ]
+                )
+            }
+        },
+        "tag_index": {},
+        "refdes_index": {},
+        "connector_index": {},
+    }
+
+    asyncio.run(run_auditor(indices, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    hint_index = {(hint.target, hint.property or ""): hint for hint in schema.dts_hints}
+    hint = hint_index[("&usb_ctrl", "port1-disabled")]
+
+    assert hint.value is None
+    assert hint.provenance.method == "page_scan"
+    assert 15 in hint.provenance.pages
+
+
 def test_run_auditor_records_uart_only_with_header_context(tmp_path):
     csv_path = tmp_path / "gpio_led.csv"
     csv_path.write_text(
@@ -145,3 +193,112 @@ def test_run_auditor_records_uart_only_with_header_context(tmp_path):
     assert uart["UART0_SOUT"].soc_pin == "GPIO_14"
     assert uart["UART0_SIN"].soc_pin == "GPIO_15"
     assert uart["UART0_SOUT"].provenance.method == "page_scan"
+
+
+def test_run_auditor_records_wan_sfp_i2c_hint_from_page_scan(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+    indices = {
+        "page_indices": {
+            "mainboard": {
+                14: "\n".join(
+                    [
+                        "U6",
+                        "I2C Address: 0XA0/A2",
+                        "SFP_SCL",
+                        "SFP_SDA",
+                        "SCL",
+                        "SDA_0",
+                    ]
+                )
+            }
+        },
+        "tag_index": {},
+        "refdes_index": {},
+        "connector_index": {},
+    }
+
+    asyncio.run(run_auditor(indices, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    hint_index = {(hint.target, hint.property or ""): hint for hint in schema.dts_hints}
+    hint = hint_index[("wan_sfp", "i2c-bus")]
+
+    assert hint.value == "<&i2c0>"
+    assert hint.provenance.method == "page_scan"
+    assert 14 in hint.provenance.pages
+
+
+def test_run_auditor_records_network_topology_hints_from_network_table(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "network.csv").write_text(
+        "\n".join(
+            [
+                "name,present,role,source,phy_handle,phy_mode,phy_group,switch_port,port_group,lane_count,lane_swap_status,notes",
+                "lan_gphy0,true,LAN,mainboard: pages 13 14,gphy0,internal-2.5gphy,PHY1,port_xgphy0,slan_sd,1,pending_audit,",
+                "lan_gphy3,true,LAN,mainboard: pages 13 14,gphy3,internal-2.5gphy,PHY2,port_xgphy3,slan_sd,1,pending_audit,",
+                "wan_10g,true,WAN,mainboard: pages 13 14,xphy10g,xfi,PHY3,port_wan@xpon_ae,xpon_ae,1,pending_audit,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+
+    asyncio.run(run_auditor({}, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    hint_index = {(hint.target, hint.property or ""): hint for hint in schema.dts_hints}
+
+    assert ("&xport", "status") in hint_index
+    assert ("&ethphytop", "xphy0-enabled") in hint_index
+    assert ("&ethphytop", "xphy3-enabled") in hint_index
+    assert ("&switch0/ports/port_xgphy0", "status") in hint_index
+    assert ("&switch0/ports/port_xgphy3", "status") in hint_index
+    assert ("&switch0/ports/port_wan@xpon_ae", "status") in hint_index
+
+
+def test_run_auditor_keeps_inferred_rows_out_of_topology_hints_but_allows_lane_swap_trace(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "network.csv").write_text(
+        "\n".join(
+            [
+                "name,present,role,source,phy_handle,phy_mode,phy_group,switch_port,port_group,lane_count,lane_swap_status,notes",
+                "lan_gphy0,inferred,LAN,mainboard: pages 13 14,gphy0,internal-2.5gphy,,,,1,pending_audit,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+    indices = {
+        "page_indices": {"mainboard": {13: "GPHY0_DP0"}},
+        "tag_index": {"GPHY0_DP0": [{"pdf_id": "mainboard", "page": 13, "context": "GPHY0_DP0"}]},
+        "refdes_index": {},
+        "connector_index": {},
+    }
+
+    with patch(
+        "dtsbuild.agents.auditor.detect_lane_swap",
+        return_value={"swap_detected": True, "swap_detail": "Pair 0 swapped", "trace_paths": []},
+    ):
+        asyncio.run(run_auditor(indices, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    hint_index = {(hint.target, hint.property or ""): hint for hint in schema.dts_hints}
+
+    assert ("&xport", "status") not in hint_index
+    assert ("&switch0/ports/port_xgphy0", "status") not in hint_index
+    assert ("&mdio_bus/xphy0", "enet-phy-lane-swap") in hint_index

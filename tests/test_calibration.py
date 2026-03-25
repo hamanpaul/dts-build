@@ -69,23 +69,24 @@ def test_refdiff_report_summary_counts_candidate_shapes():
         candidates=[
             _candidate(),
             RefDiffCandidate(
-                id=make_candidate_id("unsupported_surface", "&cpufreq"),
-                candidate_type="unsupported_surface",
+                id=make_candidate_id("missing_node", "&cpufreq"),
+                candidate_type="missing_node",
                 target="&cpufreq",
                 project="BGW720",
-                summary="Reference DTS has cpufreq but no supported renderer surface yet.",
-                route_hint="capability",
+                summary="Reference DTS defines cpufreq but generated DTS does not.",
+                route_hint="renderer",
                 subsystem="power",
                 dts_relevant=False,
+                compiler_surface="_render_cpufreq",
             ),
         ],
     )
 
     assert report.summary["total_candidates"] == 2
-    assert report.summary["by_type"]["missing_node"] == 1
-    assert report.summary["by_type"]["unsupported_surface"] == 1
-    assert report.summary["by_route_hint"]["renderer"] == 1
-    assert report.summary["by_route_hint"]["capability"] == 1
+    assert report.summary["by_type"]["missing_node"] == 2
+    assert report.summary["by_type"]["unsupported_surface"] == 0
+    assert report.summary["by_route_hint"]["renderer"] == 2
+    assert report.summary["by_route_hint"]["capability"] == 0
     assert report.summary["dts_relevant"] == {"true": 1, "false": 1}
     assert report.summary["by_subsystem"] == {"spi": 1, "power": 1}
 

@@ -105,12 +105,12 @@ class GenerateTest(unittest.TestCase):
                 encoding="utf-8",
             )
             (folder / "tables" / "network.csv").write_text(
-                "name,present,role,source,phy_handle,phy_mode,notes\n"
-                "lan_gphy0,true,LAN,test,gphy0,internal-2.5gphy,\n"
-                "lan_gphy1,true,LAN,test,gphy1,internal-2.5gphy,\n"
-                "lan_gphy2,true,LAN,test,gphy2,internal-2.5gphy,\n"
-                "lan_gphy3,true,LAN,test,gphy3,internal-2.5gphy,\n"
-                "wan_10g,true,WAN,test,xphy10g,xfi,\n",
+                "name,present,role,source,phy_handle,phy_mode,phy_group,switch_port,port_group,lane_count,lane_swap_status,notes\n"
+                "lan_gphy0,true,LAN,test,gphy0,internal-2.5gphy,PHY1,port_xgphy0,slan_sd,1,pending_audit,\n"
+                "lan_gphy1,true,LAN,test,gphy1,internal-2.5gphy,PHY1,port_xgphy1,slan_sd,1,pending_audit,\n"
+                "lan_gphy2,true,LAN,test,gphy2,internal-2.5gphy,PHY2,port_xgphy2,slan_sd,1,pending_audit,\n"
+                "lan_gphy3,true,LAN,test,gphy3,internal-2.5gphy,PHY2,port_xgphy3,slan_sd,1,pending_audit,\n"
+                "wan_10g,true,WAN,test,xphy10g,xfi,PHY3,port_wan@xpon_ae,xpon_ae,1,pending_audit,\n",
                 encoding="utf-8",
             )
             (folder / "tables" / "gpio_led.csv").write_text(

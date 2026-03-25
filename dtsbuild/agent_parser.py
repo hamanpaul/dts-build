@@ -143,6 +143,11 @@ Required JSON schema:
         "source": "",
         "phy_handle": "",
         "phy_mode": "",
+        "phy_group": "",
+        "switch_port": "",
+        "port_group": "",
+        "lane_count": "",
+        "lane_swap_status": "",
         "notes": ""
       }}
     ]

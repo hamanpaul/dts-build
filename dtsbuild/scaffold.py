@@ -33,10 +33,23 @@ CSV_TEMPLATES: dict[str, tuple[list[str], list[list[str]]]] = {
         ],
     ),
     "network.csv": (
-        ["name", "present", "role", "source", "phy_handle", "phy_mode", "notes"],
         [
-            ["port_xgphy0", "true", "LAN", "", "xphy0", "xfi", ""],
-            ["port_wan", "true", "WAN", "serdes0", "", "serdes", ""],
+            "name",
+            "present",
+            "role",
+            "source",
+            "phy_handle",
+            "phy_mode",
+            "phy_group",
+            "switch_port",
+            "port_group",
+            "lane_count",
+            "lane_swap_status",
+            "notes",
+        ],
+        [
+            ["lan_gphy0", "true", "LAN", "", "gphy0", "internal-2.5gphy", "PHY1", "port_xgphy0", "slan_sd", "1", "pending_audit", ""],
+            ["wan_10g", "true", "WAN", "", "xphy10g", "xfi", "PHY3", "port_wan@xpon_ae", "xpon_ae", "1", "pending_audit", ""],
         ],
     ),
 }
