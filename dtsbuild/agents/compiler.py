@@ -187,9 +187,28 @@ _WAN_SFP_GPIO_FACTS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+_WAN_SERDES_MDIO_GPIO_FACTS: tuple[tuple[str, str, str], ...] = (
+    ("WAN_XCVR_RXEN", "rx-power", "GPIO_ACTIVE_LOW"),
+    ("WAN_XCVR_TXEN", "tx-power", "GPIO_ACTIVE_LOW"),
+)
+
+
 def _wan_sfp_gpio_properties(signals: list[Signal]) -> list[tuple[str, int, str]]:
     properties: list[tuple[str, int, str]] = []
     for signal_name, property_name, polarity in _WAN_SFP_GPIO_FACTS:
+        signal = _find_signal(signals, signal_name)
+        if signal is None:
+            continue
+        gpio = _extract_gpio_num(signal.soc_pin)
+        if gpio is None:
+            continue
+        properties.append((property_name, int(gpio), polarity))
+    return properties
+
+
+def _wan_serdes_mdio_gpio_properties(signals: list[Signal]) -> list[tuple[str, int, str]]:
+    properties: list[tuple[str, int, str]] = []
+    for signal_name, property_name, polarity in _WAN_SERDES_MDIO_GPIO_FACTS:
         signal = _find_signal(signals, signal_name)
         if signal is None:
             continue
@@ -268,12 +287,44 @@ def _mdio_lane_swap_hints(hints: list[DtsHint]) -> list[DtsHint]:
     ]
 
 
-def _switch0_port_targets(hints: list[DtsHint]) -> list[str]:
-    return sorted({
-        hint.target
-        for hint in hints
-        if hint.target.startswith("&switch0/ports/")
-    })
+def _reference_switch0_port_targets(reference_doc: Any | None) -> list[str]:
+    if reference_doc is None:
+        return []
+    targets: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for path, nodes in reference_doc.node_index().items():
+        if not path.startswith("/&switch0/ports/") or not nodes:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        targets.append((nodes[0].start_line, path[1:]))
+    return [target for _, target in sorted(targets)]
+
+
+def _switch0_port_targets(hints: list[DtsHint], reference_doc: Any | None = None) -> list[str]:
+    return list(_switch0_port_statuses(hints, reference_doc=reference_doc))
+
+
+def _switch0_port_statuses(
+    hints: list[DtsHint],
+    reference_doc: Any | None = None,
+) -> dict[str, str]:
+    statuses: dict[str, str] = {
+        target: '"disabled"' for target in _reference_switch0_port_targets(reference_doc)
+    }
+    for hint in hints:
+        if not hint.target.startswith("&switch0/ports/"):
+            continue
+        if hint.property != "status":
+            continue
+        value = hint.value or '"okay"'
+        current = statuses.get(hint.target)
+        if current == '"okay"':
+            continue
+        if value == '"okay"' or current is None:
+            statuses[hint.target] = value
+    return statuses
 
 
 def _has_ethernet_topology_evidence(
@@ -302,7 +353,7 @@ def _has_ethernet_topology_evidence(
         "xport",
         "&xport",
     }
-    return bool(_mdio_lane_swap_hints(hints)) or bool(_switch0_port_targets(hints)) or any(
+    return bool(_mdio_lane_swap_hints(hints)) or bool(_switch0_port_statuses(hints)) or any(
         hint.target in network_targets for hint in hints
     )
 
@@ -498,10 +549,10 @@ def _render_xport(
     ])
 
 
-def _render_switch0(hints: list[DtsHint]) -> str:
-    """Render &switch0 port children from stable topology hints."""
-    port_targets = _switch0_port_targets(hints)
-    if not port_targets:
+def _render_switch0(hints: list[DtsHint], reference_doc: Any | None = None) -> str:
+    """Render &switch0 internal port inventory plus proven board-topology statuses."""
+    port_statuses = _switch0_port_statuses(hints, reference_doc=reference_doc)
+    if not port_statuses:
         return ""
 
     lines = [
@@ -509,11 +560,11 @@ def _render_switch0(hints: list[DtsHint]) -> str:
         "&switch0 {",
         f"{_INDENT}ports {{",
     ]
-    for target in port_targets:
+    for target, status in port_statuses.items():
         port_name = target.split("/ports/", 1)[1]
         lines.extend([
             f"{_INDENT}{_INDENT}{port_name} {{",
-            f'{_INDENT}{_INDENT}{_INDENT}status = "okay";',
+            f"{_INDENT}{_INDENT}{_INDENT}status = {status};",
             f"{_INDENT}{_INDENT}}};",
         ])
     lines.extend([
@@ -541,29 +592,57 @@ def _render_mdio(
     ])
 
 
+def _mdio_xphy_status_indices(hints: list[DtsHint]) -> set[int]:
+    indices: set[int] = set()
+    for hint in hints:
+        if hint.property != "status":
+            continue
+        if not hint.target.lower().startswith("&mdio_bus/xphy"):
+            continue
+        idx = _extract_xphy_index_from_target(hint.target)
+        if idx is not None:
+            indices.add(idx)
+    return indices
+
+
 def _render_mdio_bus(signals: list[Signal], hints: list[DtsHint]) -> str:
-    """Render per-xphy MDIO children for independently proven lane-swap evidence."""
-    del signals
-    lane_swap_indices = sorted({
+    """Render MDIO control-plane children from proven xphy inventory and lane-swap evidence."""
+    lane_swap_indices = {
         idx
         for idx in (
             _extract_xphy_index_from_target(hint.target)
             for hint in _mdio_lane_swap_hints(hints)
         )
         if idx is not None
-    })
-    if not lane_swap_indices:
+    }
+    xphy_indices = sorted(_mdio_xphy_status_indices(hints) | lane_swap_indices)
+    serdes_instances = [inst for inst in _infer_serdes_instances(signals) if inst == "0"]
+    if not xphy_indices and not serdes_instances:
         return ""
 
     lines = [
         "",
         "&mdio_bus {",
     ]
-    for idx in lane_swap_indices:
+    for idx in xphy_indices:
         lines.extend([
             f"{_INDENT}xphy{idx} {{",
             f'{_INDENT}{_INDENT}status = "okay";',
-            f"{_INDENT}{_INDENT}enet-phy-lane-swap;  /* Lane swap traced for GPHY{idx} */",
+        ])
+        if idx in lane_swap_indices:
+            lines.append(f"{_INDENT}{_INDENT}enet-phy-lane-swap;  /* Lane swap traced for GPHY{idx} */")
+        lines.append(f"{_INDENT}}};")
+
+    serdes_gpio_properties = _wan_serdes_mdio_gpio_properties(signals)
+    for inst in serdes_instances:
+        lines.extend([
+            f"{_INDENT}serdes{inst} {{",
+        ])
+        for property_name, gpio, polarity in serdes_gpio_properties:
+            lines.append(f"{_INDENT}{_INDENT}{property_name} = <&gpioc {gpio} {polarity}>;")
+        lines.extend([
+            f"{_INDENT}{_INDENT}trx = <&wan_sfp>;",
+            f'{_INDENT}{_INDENT}status = "okay";',
             f"{_INDENT}}};",
         ])
     lines.append("};")
@@ -1239,6 +1318,79 @@ def _should_exclude_reference_button_snippet(
     return False
 
 
+def _normalize_i2c_address(address: str) -> str:
+    normalized = address.strip().lower()
+    if normalized.startswith("0x"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("0")
+    return normalized or "0"
+
+
+def _extract_reference_i2c_child_signature(
+    target: str,
+    snippet_text: str,
+) -> tuple[str, str, str | None] | None:
+    match = re.search(r"/&(?P<bus>i2c\d+)/gpio@(?P<addr>[0-9a-f]+)$", target, re.IGNORECASE)
+    if not match:
+        return None
+
+    compatible_match = re.search(r'compatible\s*=\s*"([^"]+)"', snippet_text, re.IGNORECASE)
+    compatible = compatible_match.group(1).strip().lower() if compatible_match else None
+    return (
+        match.group("bus").lower(),
+        _normalize_i2c_address(match.group("addr")),
+        compatible,
+    )
+
+
+def _has_matching_local_i2c_device(
+    devices: list[Device],
+    *,
+    bus: str,
+    addr_hex: str,
+    compatible: str | None,
+) -> bool:
+    for device in devices:
+        if device.dnp or not device.bus or not device.address:
+            continue
+        if device.bus.lower() != bus:
+            continue
+        if _normalize_i2c_address(device.address) != addr_hex:
+            continue
+        if compatible and (device.compatible or "").lower() != compatible:
+            continue
+        return True
+    return False
+
+
+def _should_exclude_reference_i2c_child_snippet(
+    target: str,
+    snippet_text: str,
+    devices: list[Device],
+) -> bool:
+    signature = _extract_reference_i2c_child_signature(target, snippet_text)
+    if signature is None:
+        return False
+
+    bus, addr_hex, compatible = signature
+    return not _has_matching_local_i2c_device(
+        devices,
+        bus=bus,
+        addr_hex=addr_hex,
+        compatible=compatible,
+    )
+
+
+def _should_exclude_reference_switch_port_snippet(
+    target: str,
+    _hints: list[DtsHint],
+) -> bool:
+    if not target.startswith("/&switch0/ports/"):
+        return False
+
+    return True
+
+
 def _sanitize_reference_mdio_bus_snippet(snippet: list[str]) -> list[str]:
     if "&mdio_bus" not in "\n".join(snippet):
         return snippet
@@ -1278,14 +1430,19 @@ def _sanitize_reference_snippet(snippet: list[str], signals: list[Signal]) -> li
 
 
 def _should_exclude_reference_snippet(
+    target: str,
     snippet: list[str],
     signals: list[Signal],
+    devices: list[Device],
+    hints: list[DtsHint],
 ) -> bool:
     snippet_text = "\n".join(snippet)
     return (
         any(pattern.search(snippet_text) for pattern in _REFERENCE_RETENTION_EXCLUDE_SNIPPET_PATTERNS)
         or _should_exclude_reference_i2c1_snippet(snippet_text, signals)
         or _should_exclude_reference_button_snippet(snippet_text, signals)
+        or _should_exclude_reference_i2c_child_snippet(target, snippet_text, devices)
+        or _should_exclude_reference_switch_port_snippet(target, hints)
     )
 
 
@@ -1509,6 +1666,8 @@ def _apply_inline_reference_retention(
     generated_dts_path: Path,
     ref_dts_path: Path | None,
     signals: list[Signal],
+    devices: list[Device],
+    hints: list[DtsHint],
     interactive: bool,
     input_handler: Callable | None,
 ) -> str:
@@ -1544,7 +1703,7 @@ def _apply_inline_reference_retention(
         snippet = _sanitize_reference_snippet(snippet, signals)
         if not snippet:
             continue
-        if _should_exclude_reference_snippet(snippet, signals):
+        if _should_exclude_reference_snippet(candidate.target, snippet, signals, devices, hints):
             continue
 
         if candidate.candidate_type == "missing_property":
@@ -1660,11 +1819,11 @@ async def _compile_direct(
         overlay_blocks.append((3, xport_block, ("/&xport",)))
         rendered_targets.update({"xport", "&xport"})
 
-    switch0_block = _render_switch0(all_hints)
+    switch0_block = _render_switch0(all_hints, reference_doc=reference_doc)
     if switch0_block:
         overlay_blocks.append((4, switch0_block, ("/&switch0",)))
         rendered_targets.update({"switch0", "&switch0"})
-        rendered_targets.update(_switch0_port_targets(all_hints))
+        rendered_targets.update(_switch0_port_targets(all_hints, reference_doc=reference_doc))
 
     hsspi_block = _render_hsspi(verified_sigs)
     if hsspi_block:
@@ -1688,6 +1847,9 @@ async def _compile_direct(
     if mdio_bus_block:
         overlay_blocks.append((9, mdio_bus_block, ("/&mdio_bus",)))
         rendered_targets.update({"mdio_bus", "&mdio_bus"})
+        rendered_targets.update(
+            {f"&mdio_bus/xphy{idx}" for idx in _mdio_xphy_status_indices(all_hints)}
+        )
         rendered_targets.update(hint.target for hint in _mdio_lane_swap_hints(all_hints))
 
     i2c_block = _render_i2c(verified_sigs, verified_devs, reference_doc=reference_doc)
@@ -1756,6 +1918,8 @@ async def _compile_direct(
         generated_dts_path=output_path,
         ref_dts_path=ref_dts_path,
         signals=verified_sigs,
+        devices=verified_devs,
+        hints=all_hints,
         interactive=interactive,
         input_handler=input_handler,
     )

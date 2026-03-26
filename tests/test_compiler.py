@@ -163,6 +163,71 @@ def test_render_switch0_emits_proven_ports_from_topology_hints():
     assert rendered.count('status = "okay";') == 2
 
 
+def test_render_switch0_prefers_okay_over_inventory_disabled():
+    rendered = _render_switch0(
+        [
+            DtsHint(
+                target="&switch0/ports/port_xgphy0",
+                property="status",
+                value='"disabled"',
+                reason="Inventory-only internal port",
+                provenance=_prov(),
+            ),
+            DtsHint(
+                target="&switch0/ports/port_xgphy0",
+                property="status",
+                value='"okay"',
+                reason="Stable topology row lan_gphy0",
+                provenance=_prov(),
+            ),
+            DtsHint(
+                target="&switch0/ports/port_xgphy4",
+                property="status",
+                value='"disabled"',
+                reason="Inventory-only internal port",
+                provenance=_prov(),
+            ),
+        ]
+    )
+
+    assert 'port_xgphy0 {\n            status = "okay";' in rendered
+    assert 'port_xgphy4 {\n            status = "disabled";' in rendered
+
+
+def test_render_switch0_defaults_reference_ports_to_disabled(tmp_path):
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                "/dts-v1/;",
+                "",
+                "&switch0 {",
+                "    ports {",
+                "        port_xgphy0 {",
+                '            status = "okay";',
+                "        };",
+                "        port_slan0@xpon_ae {",
+                '            status = "okay";',
+                "        };",
+                "        port_wan@slan_sd {",
+                '            status = "okay";',
+                "        };",
+                "    };",
+                "};",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    reference_doc = parse_dts_document(ref_path)
+
+    rendered = _render_switch0([], reference_doc=reference_doc)
+
+    assert 'port_xgphy0 {\n            status = "disabled";' in rendered
+    assert 'port_slan0@xpon_ae {\n            status = "disabled";' in rendered
+    assert 'port_wan@slan_sd {\n            status = "disabled";' in rendered
+
+
 def test_render_i2c_emits_u41_gpio_expander():
     rendered = _render_i2c(
         [],
@@ -431,6 +496,53 @@ def test_render_mdio_bus_emits_per_xphy_lane_swap_children():
     assert "xphy2 {" in rendered
     assert rendered.count("enet-phy-lane-swap;") == 2
     assert "xphy1 {" not in rendered
+
+
+def test_render_mdio_bus_emits_control_plane_xphy_children_without_lane_swap():
+    rendered = _render_mdio_bus(
+        [],
+        [
+            DtsHint(
+                target="&mdio_bus/xphy0",
+                property="status",
+                value='"okay"',
+                reason="Inventory keeps xphy0 visible to CPU control plane",
+                provenance=_prov(),
+            ),
+            DtsHint(
+                target="&mdio_bus/xphy4",
+                property="status",
+                value='"okay"',
+                reason="Inventory keeps xphy4 visible to CPU control plane",
+                provenance=_prov(),
+            ),
+        ],
+    )
+
+    assert "&mdio_bus {" in rendered
+    assert "xphy0 {" in rendered
+    assert "xphy4 {" in rendered
+    assert rendered.count('status = "okay";') == 2
+    assert "enet-phy-lane-swap;" not in rendered
+
+
+def test_render_mdio_bus_emits_proven_wan_serdes0_child():
+    rendered = _render_mdio_bus(
+        [
+            _sig("WAN_SFP_RX_LOS", "SFP", "GPIO_03"),
+            _sig("WAN_SFP_PRESENT", "SFP", "GPIO_04"),
+            _sig("WAN_XCVR_RXEN", "SFP", "GPIO_06"),
+            _sig("WAN_XCVR_TXEN", "SFP", "GPIO_53"),
+        ],
+        [],
+    )
+
+    assert "&mdio_bus {" in rendered
+    assert "serdes0 {" in rendered
+    assert "rx-power = <&gpioc 6 GPIO_ACTIVE_LOW>;" in rendered
+    assert "tx-power = <&gpioc 53 GPIO_ACTIVE_LOW>;" in rendered
+    assert "trx = <&wan_sfp>;" in rendered
+    assert 'status = "okay";' in rendered
 
 
 def test_render_wan_sfp_emits_full_node_from_verified_sfp_signals():
@@ -884,6 +996,60 @@ def test_compile_direct_reuses_reference_i2c_gpio_expander_label(tmp_path):
     assert "u41: gpio@27 {" not in rendered
 
 
+def test_compile_direct_excludes_unmatched_reference_i2c_child_nodes(tmp_path):
+    schema = HardwareSchema(
+        project="TEST",
+        chip="BCM68575",
+        devices=[
+            Device(
+                refdes="U41",
+                part_number="TCA9555PWR",
+                compatible="nxp,pca9555",
+                bus="i2c0",
+                address="0x27",
+                status="VERIFIED",
+                provenance=_prov(),
+            )
+        ],
+    )
+
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                "/dts-v1/;",
+                "",
+                "/ {",
+                "};",
+                "",
+                "&i2c0 {",
+                '    status = "okay";',
+                "",
+                "    gpiocext_boardid: gpio@1e {",
+                '        compatible = "nxp,pca9557";',
+                "        reg = <0x1e>;",
+                "    };",
+                "",
+                "    gpiocext_wlan: gpio@27 {",
+                '        compatible = "nxp,pca9555";',
+                "        reg = <0x27>;",
+                "    };",
+                "};",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(_compile_direct(schema, output_path, ref_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert "gpiocext_wlan: gpio@27 {" in rendered
+    assert "gpiocext_boardid: gpio@1e {" not in rendered
+    assert 'compatible = "nxp,pca9557";' not in rendered
+
+
 def test_compile_direct_places_gpioc_before_pcie_ifdef_when_reference_orders_pcie_first(tmp_path):
     schema = HardwareSchema(
         project="TEST",
@@ -1216,6 +1382,137 @@ def test_compile_direct_prunes_lan_sfp_children_from_retained_mdio_bus(tmp_path)
     assert "serdes0 {" in rendered
     assert "serdes1 {" not in rendered
     assert "&lan_sfp" not in rendered
+
+
+def test_compile_direct_defaults_reference_switch0_ports_to_disabled(tmp_path):
+    schema = HardwareSchema(
+        project="TEST",
+        chip="BCM68575",
+        dts_hints=[
+            DtsHint(
+                target="&switch0/ports/port_wan@xpon_ae",
+                property="status",
+                value='"okay"',
+                reason="Stable topology row wan_10g",
+                provenance=_prov(),
+            )
+        ],
+    )
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                "/dts-v1/;",
+                "",
+                "&switch0 {",
+                "    ports {",
+                "        port_xgphy0 {",
+                '            status = "okay";',
+                "        };",
+                "        port_slan1@slan_sd {",
+                '            status = "okay";',
+                "        };",
+                "        port_wan@slan_sd {",
+                '            status = "okay";',
+                "        };",
+                "        port_wan@xpon_ae {",
+                '            status = "okay";',
+                "        };",
+                "    };",
+                "};",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(_compile_direct(schema, output_path, ref_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert "port_wan@xpon_ae {" in rendered
+    assert 'port_wan@xpon_ae {\n            status = "okay";' in rendered
+    assert 'port_xgphy0 {\n            status = "disabled";' in rendered
+    assert 'port_slan1@slan_sd {\n            status = "disabled";' in rendered
+    assert 'port_wan@slan_sd {\n            status = "disabled";' in rendered
+
+
+def test_compile_direct_excludes_reference_switch0_properties_for_local_ports(tmp_path):
+    schema = HardwareSchema(
+        project="TEST",
+        chip="BCM68575",
+        dts_hints=[
+            DtsHint(
+                target="&switch0/ports/port_xgphy0",
+                property="status",
+                value='"disabled"',
+                reason="Inventory-only internal port",
+                provenance=_prov(),
+            )
+        ],
+    )
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text(
+        "\n".join(
+            [
+                "/dts-v1/;",
+                "",
+                "&switch0 {",
+                "    ports {",
+                "        port_xgphy0 {",
+                "            network-leds = <&led0 &led1>;",
+                '            status = "okay";',
+                "        };",
+                "    };",
+                "};",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(_compile_direct(schema, output_path, ref_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert 'status = "disabled";' in rendered
+    assert "network-leds" not in rendered
+    assert "Retained from public reference" not in rendered
+
+
+def test_compile_direct_does_not_repeat_rendered_mdio_xphy_hints(tmp_path):
+    schema = HardwareSchema(
+        project="TEST",
+        chip="BCM68575",
+        dts_hints=[
+            DtsHint(
+                target="&mdio_bus/xphy3",
+                property="status",
+                value='"okay"',
+                reason="Inventory keeps xphy3 controllable",
+                provenance=_prov(),
+            ),
+            DtsHint(
+                target="&mdio_bus/xphy4",
+                property="status",
+                value='"okay"',
+                reason="Inventory keeps xphy4 controllable",
+                provenance=_prov(),
+            ),
+        ],
+    )
+    output_path = tmp_path / "test.dts"
+    ref_path = tmp_path / "ref.dts"
+    ref_path.write_text("/dts-v1/;\n\n/ {\n};\n", encoding="utf-8")
+
+    asyncio.run(_compile_direct(schema, output_path, ref_path))
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert rendered.count("&mdio_bus {") == 1
+    assert "xphy3 {\n        status = \"okay\";\n    };" in rendered
+    assert "xphy4 {\n        status = \"okay\";\n    };" in rendered
+    assert "&mdio_bus/xphy3 {" not in rendered
+    assert "&mdio_bus/xphy4 {" not in rendered
 
 
 def test_compile_direct_excludes_retained_i2c1_reference_block(tmp_path):

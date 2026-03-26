@@ -297,10 +297,9 @@ def _proven_network_gphy_prefixes(network_rows: list[dict[str, str]]) -> set[str
     for row in network_rows:
         if not _has_present_truth(row):
             continue
-        phy_handle = (row.get("phy_handle") or "").strip().lower()
-        match = re.fullmatch(r"gphy(\d+)", phy_handle)
-        if match:
-            prefixes.add(f"GPHY{match.group(1)}")
+        prefix = _network_row_trace_prefix(row)
+        if prefix:
+            prefixes.add(prefix)
     return prefixes
 
 
@@ -310,11 +309,63 @@ def _lane_swap_candidate_gphy_prefixes(network_rows: list[dict[str, str]]) -> se
         present = (row.get("present") or "").strip().lower()
         if present not in {"true", "yes", "1", "y", "inferred"}:
             continue
-        phy_handle = (row.get("phy_handle") or "").strip().lower()
-        match = re.fullmatch(r"gphy(\d+)", phy_handle)
-        if match:
-            prefixes.add(f"GPHY{match.group(1)}")
+        prefix = _network_row_trace_prefix(row)
+        if prefix:
+            prefixes.add(prefix)
     return prefixes
+
+
+def _network_row_trace_prefix(row: dict[str, str]) -> str | None:
+    prefix = (row.get("trace_prefix") or "").strip().upper()
+    if prefix:
+        return prefix
+    phy_handle = (row.get("phy_handle") or "").strip().lower()
+    match = re.fullmatch(r"gphy(\d+)", phy_handle)
+    if match:
+        return f"GPHY{match.group(1)}"
+    return None
+
+
+def _network_row_xphy_index(row: dict[str, str]) -> int | None:
+    phy_handle = (row.get("phy_handle") or "").strip().lower()
+    match = re.fullmatch(r"gphy(\d+)", phy_handle)
+    if match:
+        return int(match.group(1))
+    if phy_handle in {"xphy10g", "10gphy"}:
+        return 4
+    return None
+
+
+def _lane_swap_target_indices(network_rows: list[dict[str, str]]) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for row in network_rows:
+        present = (row.get("present") or "").strip().lower()
+        if present not in {"true", "yes", "1", "y", "inferred"}:
+            continue
+        prefix = _network_row_trace_prefix(row)
+        idx = _network_row_xphy_index(row)
+        if prefix is None or idx is None:
+            continue
+        mapping[prefix] = idx
+    return mapping
+
+
+def _switch0_internal_port_target(row: dict[str, str]) -> str | None:
+    idx = _network_row_xphy_index(row)
+    if idx is None:
+        return None
+    return f"&switch0/ports/port_xgphy{idx}"
+
+
+def _active_switch0_internal_xphy_indices(network_rows: list[dict[str, str]]) -> set[int]:
+    indices: set[int] = set()
+    for row in network_rows:
+        if not _has_present_truth(row):
+            continue
+        idx = _network_row_xphy_index(row)
+        if idx is not None:
+            indices.add(idx)
+    return indices
 
 
 def _network_row_provenance(row: dict[str, str]) -> dict[str, Any]:
@@ -343,8 +394,96 @@ def _network_row_provenance(row: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _network_control_plane_xphy_indices(network_rows: list[dict[str, str]]) -> set[int]:
+    indices: set[int] = set()
+    for row in network_rows:
+        note = (row.get("notes") or "").strip()
+        if "XPORT inventory" not in note:
+            continue
+        for match in re.finditer(r"\bport_xgphy(\d+)\b", note):
+            indices.add(int(match.group(1)))
+    return indices
+
+
+def _control_plane_inventory_provenance(network_rows: list[dict[str, str]]) -> dict[str, Any] | None:
+    for row in network_rows:
+        note = (row.get("notes") or "").strip()
+        if "XPORT inventory" in note:
+            return _network_row_provenance(row)
+    return None
+
+
+def _emit_ethernet_control_plane_hints(network_rows: list[dict[str, str]], schema_path: str) -> None:
+    xphy_indices = _network_control_plane_xphy_indices(network_rows)
+    if not xphy_indices:
+        return
+
+    provenance = _control_plane_inventory_provenance(network_rows)
+    if provenance is None:
+        return
+
+    write_dts_hint(
+        schema_path=schema_path,
+        target="&xport",
+        property="status",
+        value='"okay"',
+        reason="CPU datasheet-validated XPORT inventory plus board Ethernet topology require the integrated switch transport to stay visible.",
+        provenance=provenance,
+    )
+
+    for idx in sorted(xphy_indices):
+        write_dts_hint(
+            schema_path=schema_path,
+            target="&ethphytop",
+            property=f"xphy{idx}-enabled",
+            reason=(
+                "CPU datasheet-validated XPORT inventory plus board Ethernet topology "
+                f"keep xphy{idx} visible to the integrated Ethernet control plane."
+            ),
+            provenance=provenance,
+        )
+        write_dts_hint(
+            schema_path=schema_path,
+            target=f"&mdio_bus/xphy{idx}",
+            property="status",
+            value='"okay"',
+            reason=(
+                "CPU datasheet-validated XPORT inventory plus board Ethernet topology "
+                f"keep mdio_bus/xphy{idx} controllable even when board-level switch0 exposure differs."
+            ),
+            provenance=provenance,
+        )
+
+
+def _emit_switch0_inventory_hints(network_rows: list[dict[str, str]], schema_path: str) -> None:
+    xphy_indices = _network_control_plane_xphy_indices(network_rows)
+    if not xphy_indices:
+        return
+
+    provenance = _control_plane_inventory_provenance(network_rows)
+    if provenance is None:
+        return
+
+    for idx in sorted(xphy_indices - _active_switch0_internal_xphy_indices(network_rows)):
+        write_dts_hint(
+            schema_path=schema_path,
+            target=f"&switch0/ports/port_xgphy{idx}",
+            property="status",
+            value='"disabled"',
+            reason=(
+                "CPU datasheet-validated XPORT inventory keeps "
+                f"switch0/port_xgphy{idx} present as an internal switch port; "
+                "without stable board-level mapping evidence it stays disabled."
+            ),
+            provenance=provenance,
+        )
+
+
 def _audit_network_topology(network_rows: list[dict[str, str]], schema_path: str) -> None:
     wrote_xport = False
+    _emit_ethernet_control_plane_hints(network_rows, schema_path)
+    _emit_switch0_inventory_hints(network_rows, schema_path)
+    wrote_xport = bool(_network_control_plane_xphy_indices(network_rows))
 
     for row in network_rows:
         if not _has_present_truth(row):
@@ -357,14 +496,25 @@ def _audit_network_topology(network_rows: list[dict[str, str]], schema_path: str
         switch_port = (row.get("switch_port") or "").strip()
         provenance = _network_row_provenance(row)
 
+        topology_targets = []
+        internal_switch_target = _switch0_internal_port_target(row)
+        if internal_switch_target:
+            topology_targets.append(internal_switch_target)
         if switch_port:
+            topology_targets.append(f"&switch0/ports/{switch_port}")
+
+        seen_targets: set[str] = set()
+        for target in topology_targets:
+            if target in seen_targets:
+                continue
+            seen_targets.add(target)
             write_dts_hint(
                 schema_path=schema_path,
-                target=f"&switch0/ports/{switch_port}",
+                target=target,
                 property="status",
                 value='"okay"',
                 reason=(
-                    f"Stable topology row {name or switch_port}: role={role or 'UNKNOWN'}, "
+                    f"Stable topology row {name or target.rsplit('/', 1)[-1]}: role={role or 'UNKNOWN'}, "
                     f"phy_handle={phy_handle or 'UNKNOWN'}, phy_group={phy_group or 'UNKNOWN'}"
                 ),
                 provenance=provenance,
@@ -1000,6 +1150,7 @@ def _audit_gphy_lane_swap(
     schema_path: str,
     *,
     allowed_prefixes: set[str] | None = None,
+    target_indices: dict[str, int] | None = None,
 ) -> None:
     """Detect lane swaps for all GPHY groups and write hints."""
     tag_index = indices.get("tag_index", {})
@@ -1051,7 +1202,7 @@ def _audit_gphy_lane_swap(
 
                 write_dts_hint(
                     schema_path=schema_path,
-                    target=f"&mdio_bus/xphy{prefix.removeprefix('GPHY')}",
+                    target=f"&mdio_bus/xphy{(target_indices or {}).get(prefix, int(prefix.removeprefix('GPHY')))}",
                     property="enet-phy-lane-swap",
                     value=f"{prefix}: {result['swap_detail']}",
                     reason=f"Lane swap detected for {prefix}: {result['swap_detail']}",
@@ -1234,7 +1385,12 @@ async def _audit_direct(
 
     # 3. GPHY lane swap detection
     logger.info("Running GPHY lane swap detection")
-    _audit_gphy_lane_swap(indices, sp, allowed_prefixes=_lane_swap_candidate_gphy_prefixes(network_rows))
+    _audit_gphy_lane_swap(
+        indices,
+        sp,
+        allowed_prefixes=_lane_swap_candidate_gphy_prefixes(network_rows),
+        target_indices=_lane_swap_target_indices(network_rows),
+    )
 
     # 4. Device audit
     logger.info("Running device audit")

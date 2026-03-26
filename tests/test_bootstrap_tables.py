@@ -123,6 +123,12 @@ class BootstrapTablesTest(unittest.TestCase):
                     2.5GPHY 1
                     2.5GPHY 2
                     2.5GPHY 3
+                    GPHY0_DP0
+                    GPHY0_DN0
+                    GPHY1_DP0
+                    GPHY1_DN0
+                    GPHY2_DP0
+                    GPHY2_DN0
                     8P8C
                 """,
                 ("MAINBOARD.pdf", 14, 14): """
@@ -207,11 +213,13 @@ class BootstrapTablesTest(unittest.TestCase):
                     and row["switch_port"] == ""
                     and row["port_group"] == ""
                     and row["lane_swap_status"] == "pending_audit"
+                    and "Derived from concrete GPHY differential net labels on schematic pages." in row["notes"]
                     and "Block diagram OCR detected 1GE LAN x3." in row["notes"]
                     and "CPU datasheet validates XPORT inventory" in row["notes"]
                     for row in network_rows
                 )
             )
+            self.assertFalse(any(row["name"] == "lan_gphy3" for row in network_rows))
             self.assertTrue(
                 any(
                     row["name"] == "wan_10g"

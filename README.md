@@ -105,7 +105,7 @@ dtsin_MyBoard/
     blockdiag.csv                # 建議：方塊圖/port inventory
     ddr.csv                      # 建議：DDR 顆粒與 bus 寬度
     gpio_led.csv                 # 建議：GPIO / LED / button / power / SFP / USB
-    network.csv                  # 建議：switch / xport / phy / serdes topology
+    network.csv                  # 建議：switch / xport / phy / serdes topology（phy_handle=CPU naming；trace_prefix=schematic alias）
   968575REF1.dts                 # 選配：public reference DTS
   board-main.pdf                 # 選配：主板 schematic / block diagram
   board-daughter.pdf             # 選配：子板 schematic
@@ -268,7 +268,7 @@ artifacts:
 | `artifacts.blockdiag_table` | 強烈建議 | 標準化 block diagram / port inventory table；sufficiency scanner 會把它當作第一層介面盤點來源。 | `tables/blockdiag.csv` |
 | `artifacts.ddr_table` | 強烈建議 | DDR 顆粒、bus width、容量等整理表。 | `tables/ddr.csv` |
 | `artifacts.gpio_led_table` | 強烈建議 | GPIO / LED / button / reset / SFP / USB / power 等主要引腳表。 | `tables/gpio_led.csv` |
-| `artifacts.network_table` | 強烈建議 | switch / xport / phy / serdes / wan topology 整理表。 | `tables/network.csv` |
+| `artifacts.network_table` | 強烈建議 | switch / xport / phy / serdes / wan topology 整理表。`phy_handle` 應使用 CPU / DTS naming；若 schematic net alias 不同，可另用 `trace_prefix` 保存 tracing 用前綴。 | `tables/network.csv` |
 | `artifacts.public_ref_dts` | 選填，但建議 | public reference DTS；只作 public rule / ordering / review context，不可當答案卷。 | 例如 `968575REF1.dts` |
 | `artifacts.schematic_pdfs` | 選填，但很有幫助 | 原始 schematic / mainboard / daughterboard PDF；給 bootstrap、auditor 與 ask-me 使用。 | 一個或多個 PDF 檔名 |
 | `notes` | 選填 | 人工備註。 | 任意短句 |
