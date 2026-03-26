@@ -113,6 +113,7 @@ def bootstrap_tables(folder: Path, *, force: bool = False) -> BootstrapTablesRes
                 "port_group",
                 "lane_count",
                 "lane_swap_status",
+                "trace_prefix",
                 "notes",
             ],
             network_rows,
@@ -330,6 +331,7 @@ def _bootstrap_network_rows(
                 "port_group": row.get("port_group", ""),
                 "lane_count": row.get("lane_count", ""),
                 "lane_swap_status": row.get("lane_swap_status", ""),
+                "trace_prefix": row.get("trace_prefix", ""),
                 "notes": row.get("notes", ""),
             }
             for row in read_table_rows(existing_source)
@@ -376,12 +378,13 @@ def _bootstrap_network_rows(
         if ocr_used:
             source_notes.append(f"network_table used block diagram OCR fallback for {pdf.name}")
         seen_lan: set[str] = set()
-        for lane in sorted(set(re.findall(r"2\.5GPHY\s*([0-9])", text, flags=re.IGNORECASE))):
+        inferred_lanes, lane_inference_note = _infer_gphy_lanes(text)
+        for lane in inferred_lanes:
             name = f"lan_gphy{lane}"
             if name in seen_lan:
                 continue
             notes = [
-                "Derived from 2.5GPHY lane labels on schematic pages.",
+                lane_inference_note,
                 "Exact board-level port mapping still requires explicit topology evidence.",
             ]
             if blockdiag_note:
@@ -405,6 +408,7 @@ def _bootstrap_network_rows(
                     "port_group": "",
                     "lane_count": "1",
                     "lane_swap_status": "pending_audit",
+                    "trace_prefix": f"GPHY{lane}",
                     "notes": " ".join(notes),
                 }
             )
@@ -436,6 +440,7 @@ def _bootstrap_network_rows(
                     "port_group": port_group,
                     "lane_count": "1",
                     "lane_swap_status": "pending_audit",
+                    "trace_prefix": "",
                     "notes": " ".join(notes),
                 }
             )
@@ -463,6 +468,7 @@ def _bootstrap_network_rows(
                     "port_group": port_group,
                     "lane_count": "1",
                     "lane_swap_status": "pending_audit",
+                    "trace_prefix": "",
                     "notes": " ".join(notes),
                 }
             )
@@ -763,6 +769,37 @@ def _extract_datasheet_switch_port_inventory(
         ):
             return switch_ports, [f"switch_port inventory validated against CPU datasheet {pdf.name}"]
     return set(), []
+
+
+def _extract_gphy_net_lanes(text: str) -> list[str]:
+    lanes = {
+        match.group(1)
+        for match in re.finditer(
+            r"\bGPHY(\d+)_(?:DP|DN)[0-3](?:_\d+)?\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    }
+    return sorted(lanes, key=int)
+
+
+def _extract_gphy_label_lanes(text: str) -> list[str]:
+    return sorted(
+        set(re.findall(r"2\.5GPHY\s*([0-9])", text, flags=re.IGNORECASE)),
+        key=int,
+    )
+
+
+def _infer_gphy_lanes(text: str) -> tuple[list[str], str]:
+    net_lanes = _extract_gphy_net_lanes(text)
+    if net_lanes:
+        return net_lanes, "Derived from concrete GPHY differential net labels on schematic pages."
+
+    label_lanes = _extract_gphy_label_lanes(text)
+    if label_lanes:
+        return label_lanes, "Derived from 2.5GPHY lane labels on schematic pages."
+
+    return [], ""
 
 
 def _summarize_blockdiag_profile(text: str) -> str:

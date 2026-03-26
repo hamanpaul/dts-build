@@ -302,3 +302,143 @@ def test_run_auditor_keeps_inferred_rows_out_of_topology_hints_but_allows_lane_s
     assert ("&xport", "status") not in hint_index
     assert ("&switch0/ports/port_xgphy0", "status") not in hint_index
     assert ("&mdio_bus/xphy0", "enet-phy-lane-swap") in hint_index
+
+
+def test_run_auditor_maps_trace_prefix_lane_swap_to_cpu_xphy_index(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "network.csv").write_text(
+        "\n".join(
+            [
+                "name,present,role,source,phy_handle,phy_mode,phy_group,switch_port,port_group,lane_count,lane_swap_status,trace_prefix,notes",
+                "lan_gphy0,true,LAN,mainboard: pages 13 14,gphy1,internal-2.5gphy,,,,1,pending_audit,GPHY0,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+    indices = {
+        "page_indices": {"mainboard": {13: "GPHY0_DP0"}},
+        "tag_index": {"GPHY0_DP0": [{"pdf_id": "mainboard", "page": 13, "context": "GPHY0_DP0"}]},
+        "refdes_index": {},
+        "connector_index": {},
+    }
+
+    with patch(
+        "dtsbuild.agents.auditor.detect_lane_swap",
+        return_value={"swap_detected": True, "swap_detail": "Pair 0 swapped", "trace_paths": []},
+    ):
+        asyncio.run(run_auditor(indices, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    hint_index = {(hint.target, hint.property or ""): hint for hint in schema.dts_hints}
+
+    assert ("&mdio_bus/xphy1", "enet-phy-lane-swap") in hint_index
+    assert ("&mdio_bus/xphy0", "enet-phy-lane-swap") not in hint_index
+
+
+def test_run_auditor_emits_control_plane_and_switch0_inventory_hints_from_inventory_notes(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "network.csv").write_text(
+        "\n".join(
+            [
+                "name,present,role,source,phy_handle,phy_mode,phy_group,switch_port,port_group,lane_count,lane_swap_status,notes",
+                (
+                    'lan_gphy0,inferred,LAN,mainboard: pages 2 13 14,gphy0,internal-2.5gphy,,,,1,pending_audit,'
+                    '"Derived from concrete GPHY differential net labels on schematic pages. '
+                    'CPU datasheet validates XPORT inventory '
+                    'port_xgphy0,port_xgphy1,port_xgphy2,port_xgphy3,port_xgphy4."'
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+
+    asyncio.run(run_auditor({}, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    hint_index = {(hint.target, hint.property or ""): hint for hint in schema.dts_hints}
+
+    assert ("&xport", "status") in hint_index
+    assert ("&ethphytop", "xphy0-enabled") in hint_index
+    assert ("&ethphytop", "xphy4-enabled") in hint_index
+    assert ("&mdio_bus/xphy0", "status") in hint_index
+    assert ("&mdio_bus/xphy4", "status") in hint_index
+    assert ("&switch0/ports/port_xgphy0", "status") in hint_index
+    assert hint_index[("&switch0/ports/port_xgphy0", "status")].value == '"disabled"'
+    assert ("&switch0/ports/port_xgphy4", "status") in hint_index
+    assert hint_index[("&switch0/ports/port_xgphy4", "status")].value == '"disabled"'
+
+
+def test_run_auditor_emits_internal_switch0_xgphy4_for_wan_10g_row(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "network.csv").write_text(
+        "\n".join(
+            [
+                "name,present,role,source,phy_handle,phy_mode,phy_group,switch_port,port_group,lane_count,lane_swap_status,notes",
+                "wan_10g,true,WAN,mainboard: pages 13 14,xphy10g,xfi,,port_wan@xpon_ae,xpon_ae,1,pending_audit,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+
+    asyncio.run(run_auditor({}, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    hint_index = {(hint.target, hint.property or ""): hint for hint in schema.dts_hints}
+
+    assert ("&switch0/ports/port_xgphy4", "status") in hint_index
+    assert hint_index[("&switch0/ports/port_xgphy4", "status")].value == '"okay"'
+    assert ("&switch0/ports/port_wan@xpon_ae", "status") in hint_index
+
+
+def test_run_auditor_skips_inventory_disabled_for_active_internal_xgphy(tmp_path):
+    csv_path = tmp_path / "gpio_led.csv"
+    csv_path.write_text(
+        "category,name,signal,pin_or_gpio,polarity,io,notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "network.csv").write_text(
+        "\n".join(
+            [
+                "name,present,role,source,phy_handle,phy_mode,phy_group,switch_port,port_group,lane_count,lane_swap_status,trace_prefix,notes",
+                (
+                    'lan_gphy0,true,LAN,mainboard: pages 2 13 14,gphy1,internal-2.5gphy,,,,1,pending_audit,GPHY0,'
+                    '"Derived from concrete GPHY differential net labels on schematic pages. '
+                    'CPU datasheet validates XPORT inventory '
+                    'port_xgphy0,port_xgphy1,port_xgphy2,port_xgphy3,port_xgphy4."'
+                ),
+                "wan_10g,true,WAN,mainboard: pages 13 14,xphy10g,xfi,,port_wan@xpon_ae,xpon_ae,1,pending_audit,,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    schema_path = tmp_path / "schema.yaml"
+
+    asyncio.run(run_auditor({}, csv_path, schema_path))
+
+    schema = load_schema(schema_path)
+    values = {
+        hint.value
+        for hint in schema.dts_hints
+        if hint.target == "&switch0/ports/port_xgphy1" and hint.property == "status"
+    }
+
+    assert values == {'"okay"'}

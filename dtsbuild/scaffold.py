@@ -45,11 +45,12 @@ CSV_TEMPLATES: dict[str, tuple[list[str], list[list[str]]]] = {
             "port_group",
             "lane_count",
             "lane_swap_status",
+            "trace_prefix",
             "notes",
         ],
         [
-            ["lan_gphy0", "true", "LAN", "", "gphy0", "internal-2.5gphy", "PHY1", "port_xgphy0", "slan_sd", "1", "pending_audit", ""],
-            ["wan_10g", "true", "WAN", "", "xphy10g", "xfi", "PHY3", "port_wan@xpon_ae", "xpon_ae", "1", "pending_audit", ""],
+            ["lan_gphy0", "true", "LAN", "", "gphy0", "internal-2.5gphy", "PHY1", "port_xgphy0", "slan_sd", "1", "pending_audit", "GPHY0", ""],
+            ["wan_10g", "true", "WAN", "", "xphy10g", "xfi", "PHY3", "port_wan@xpon_ae", "xpon_ae", "1", "pending_audit", "", ""],
         ],
     ),
 }
