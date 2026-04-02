@@ -419,14 +419,14 @@ class TestTracingTools:
         assert r["compatible"] == "nxp,pca9555"
 
     def test_lookup_refdes_multiline_context_returns_normalized_part_and_address(self) -> None:
-        """Fallback lookup should mine multi-line context for part/address metadata."""
+        """Fallback lookup should mine part/address/bus metadata from multi-line context."""
         pages = {
             5: "\n".join(
                 [
                     "VIN J4 3V3_D U41 1K 1K 1K",
                     "A0 I/O0_3 8",
-                    "SDA I/O0_7 13",
-                    "SCL I/O1_1 15",
+                    "SDA_M1 I/O0_7 13",
+                    "SCL_M1 I/O1_1 15",
                     "I/O1_7",
                     "TCA9555PWR",
                     "0x27",
@@ -440,6 +440,7 @@ class TestTracingTools:
         assert r["normalized_part_number"] == "TCA9555"
         assert r["compatible"] == "nxp,pca9555"
         assert r["address"] == "0x27"
+        assert r["bus"] == "i2c1"
 
     def test_check_bom_no_bom(self) -> None:
         """Without a BOM file the component should be assumed populated."""

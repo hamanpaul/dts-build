@@ -590,6 +590,35 @@ def _extract_address_from_contexts(contexts: list[str]) -> str | None:
     return None
 
 
+def _extract_bus_from_contexts(contexts: list[str]) -> str | None:
+    """Infer an I2C bus name from bus-labelled net aliases in lookup contexts."""
+    pattern_groups = (
+        (
+            re.compile(r"\b(?:SDA|SCL)_M(\d+)\b", re.IGNORECASE),
+            re.compile(r"\bBSC_M(\d+)\b", re.IGNORECASE),
+        ),
+        (
+            re.compile(r"\b(?:SDA|SCL|BSC_SDA|BSC_SCL)_(\d+)\b", re.IGNORECASE),
+            re.compile(r"\bI2C[_\s-]?(\d+)\b", re.IGNORECASE),
+        ),
+    )
+
+    for patterns in pattern_groups:
+        candidates: list[str] = []
+        for context in contexts:
+            for pattern in patterns:
+                for match in pattern.finditer(context):
+                    bus = f"i2c{int(match.group(1))}"
+                    if bus not in candidates:
+                        candidates.append(bus)
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            return None
+
+    return None
+
+
 def _primary_lookup_context(contexts: list[str]) -> str:
     """Return the richest lookup context instead of a tiny single-line snippet."""
     for context in contexts:
@@ -1179,6 +1208,7 @@ def lookup_refdes(
     normalized_part_number: str | None = None
     compatible: str | None = None
     address: str | None = None
+    bus: str | None = None
     description = ""
 
     entry = _pick_best_refdes_entry(refdes_index.get(refdes, {}))
@@ -1204,6 +1234,7 @@ def lookup_refdes(
 
     normalized_part_number = _normalize_part_number(part_number)
     address = _extract_address_from_contexts(contexts)
+    bus = _extract_bus_from_contexts(contexts)
 
     # Map part number to DT compatible string
     if part_number:
@@ -1231,7 +1262,7 @@ def lookup_refdes(
         "normalized_part_number": normalized_part_number,
         "compatible": compatible,
         "address": address,
-        "bus": None,
+        "bus": bus,
         "lookup_context": _primary_lookup_context(contexts),
         "description": description,
     }
